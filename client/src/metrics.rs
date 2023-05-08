@@ -1,13 +1,12 @@
 use crate::{AttachMetricLabels, LONG_POLL_METHOD_NAMES};
 use futures::{future::BoxFuture, FutureExt};
-use opentelemetry::{
-    metrics::{Counter, Histogram},
-    KeyValue,
-};
 use std::{
     sync::Arc,
     task::{Context, Poll},
     time::{Duration, Instant},
+};
+use temporal_sdk_core_api::telemetry::metrics::{
+    CoreMeter, Counter, Histogram, MetricAttributes, MetricKeyValue, MetricsAttributesOptions,
 };
 use tonic::{body::BoxBody, transport::Channel};
 use tower::Service;
@@ -15,35 +14,25 @@ use tower::Service;
 /// Used to track context associated with metrics, and record/update them
 // Possible improvement: make generic over some type tag so that methods are only exposed if the
 // appropriate k/vs have already been set.
-#[derive(Clone, Debug)]
+#[derive(Clone, derive_more::DebugCustom)]
+#[debug(fmt = "MetricsContext {{ attribs: {kvs:?}, poll_is_long: {poll_is_long} }}")]
 pub struct MetricsContext {
-    ctx: opentelemetry::Context,
-    kvs: Arc<Vec<KeyValue>>,
+    kvs: MetricAttributes,
     poll_is_long: bool,
 
-    svc_request: Counter<u64>,
-    svc_request_failed: Counter<u64>,
-    long_svc_request: Counter<u64>,
-    long_svc_request_failed: Counter<u64>,
+    svc_request: Arc<dyn Counter>,
+    svc_request_failed: Arc<dyn Counter>,
+    long_svc_request: Arc<dyn Counter>,
+    long_svc_request_failed: Arc<dyn Counter>,
 
-    svc_request_latency: Histogram<u64>,
-    long_svc_request_latency: Histogram<u64>,
-}
-
-/// Things that can provide metrics for the client implement this. Trait exists to avoid having
-/// to make a whole new lower-level crate just for a tiny shared wrapper around OTel meters.
-pub trait ClientMetricProvider: Send + Sync {
-    /// Construct a counter metric
-    fn counter(&self, name: &'static str) -> Counter<u64>;
-    /// Construct a histogram metric
-    fn histogram(&self, name: &'static str) -> Histogram<u64>;
+    svc_request_latency: Arc<dyn Histogram>,
+    long_svc_request_latency: Arc<dyn Histogram>,
 }
 
 impl MetricsContext {
-    pub(crate) fn new(kvs: Vec<KeyValue>, metric_provider: &dyn ClientMetricProvider) -> Self {
+    pub(crate) fn new(metric_provider: &dyn CoreMeter) -> Self {
         Self {
-            ctx: opentelemetry::Context::current(),
-            kvs: Arc::new(kvs),
+            kvs: metric_provider.new_attributes(MetricsAttributesOptions::default()),
             poll_is_long: false,
             svc_request: metric_provider.counter("request"),
             svc_request_failed: metric_provider.counter("request_failure"),
@@ -55,15 +44,15 @@ impl MetricsContext {
     }
 
     /// Extend an existing metrics context with new attributes, returning a new one
-    pub(crate) fn with_new_attrs(&self, new_kvs: impl IntoIterator<Item = KeyValue>) -> Self {
+    pub(crate) fn with_new_attrs(&self, new_kvs: impl IntoIterator<Item = MetricKeyValue>) -> Self {
         let mut r = self.clone();
         r.add_new_attrs(new_kvs);
         r
     }
 
     /// Add new attributes to the context, mutating it
-    pub(crate) fn add_new_attrs(&mut self, new_kvs: impl IntoIterator<Item = KeyValue>) {
-        Arc::make_mut(&mut self.kvs).extend(new_kvs);
+    pub(crate) fn add_new_attrs(&mut self, new_kvs: impl IntoIterator<Item = MetricKeyValue>) {
+        self.kvs.add_new_attrs(new_kvs);
     }
 
     pub(crate) fn set_is_long_poll(&mut self) {
@@ -73,18 +62,18 @@ impl MetricsContext {
     /// A request to the temporal service was made
     pub(crate) fn svc_request(&self) {
         if self.poll_is_long {
-            self.long_svc_request.add(&self.ctx, 1, &self.kvs);
+            self.long_svc_request.add(1, &self.kvs);
         } else {
-            self.svc_request.add(&self.ctx, 1, &self.kvs);
+            self.svc_request.add(1, &self.kvs);
         }
     }
 
     /// A request to the temporal service failed
     pub(crate) fn svc_request_failed(&self) {
         if self.poll_is_long {
-            self.long_svc_request_failed.add(&self.ctx, 1, &self.kvs);
+            self.long_svc_request_failed.add(1, &self.kvs);
         } else {
-            self.svc_request_failed.add(&self.ctx, 1, &self.kvs);
+            self.svc_request_failed.add(1, &self.kvs);
         }
     }
 
@@ -92,10 +81,10 @@ impl MetricsContext {
     pub(crate) fn record_svc_req_latency(&self, dur: Duration) {
         if self.poll_is_long {
             self.long_svc_request_latency
-                .record(&self.ctx, dur.as_millis() as u64, &self.kvs);
+                .record(dur.as_millis() as u64, &self.kvs);
         } else {
             self.svc_request_latency
-                .record(&self.ctx, dur.as_millis() as u64, &self.kvs);
+                .record(dur.as_millis() as u64, &self.kvs);
         }
     }
 }
@@ -104,16 +93,16 @@ const KEY_NAMESPACE: &str = "namespace";
 const KEY_SVC_METHOD: &str = "operation";
 const KEY_TASK_QUEUE: &str = "task_queue";
 
-pub(crate) fn namespace_kv(ns: String) -> KeyValue {
-    KeyValue::new(KEY_NAMESPACE, ns)
+pub(crate) fn namespace_kv(ns: String) -> MetricKeyValue {
+    MetricKeyValue::new(KEY_NAMESPACE, ns)
 }
 
-pub(crate) fn task_queue_kv(tq: String) -> KeyValue {
-    KeyValue::new(KEY_TASK_QUEUE, tq)
+pub(crate) fn task_queue_kv(tq: String) -> MetricKeyValue {
+    MetricKeyValue::new(KEY_TASK_QUEUE, tq)
 }
 
-pub(crate) fn svc_operation(op: String) -> KeyValue {
-    KeyValue::new(KEY_SVC_METHOD, op)
+pub(crate) fn svc_operation(op: String) -> MetricKeyValue {
+    MetricKeyValue::new(KEY_SVC_METHOD, op)
 }
 
 /// Implements metrics functionality for gRPC (really, any http) calls

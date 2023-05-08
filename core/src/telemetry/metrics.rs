@@ -1,17 +1,16 @@
 use crate::telemetry::TelemetryInstance;
-use opentelemetry::{
-    metrics::{noop::NoopMeterProvider, Counter, Histogram, Meter, MeterProvider},
-    sdk::{
-        export::metrics::AggregatorSelector,
-        metrics::{
-            aggregators::{histogram, last_value, sum, Aggregator},
-            sdk_api::{Descriptor, InstrumentKind},
-        },
+use opentelemetry::sdk::{
+    export::metrics::AggregatorSelector,
+    metrics::{
+        aggregators::{histogram, last_value, sum, Aggregator},
+        sdk_api::{Descriptor, InstrumentKind},
     },
-    Context, KeyValue,
 };
-use std::{ops::Deref, sync::Arc, time::Duration};
-use temporal_client::ClientMetricProvider;
+use std::{sync::Arc, time::Duration};
+use temporal_sdk_core_api::telemetry::metrics::{
+    CoreMeter, Counter, Gauge, Histogram, MetricAttributes, MetricKeyValue,
+    MetricsAttributesOptions, NoOpCoreMeter,
+};
 
 /// Used to track context associated with metrics, and record/update them
 ///
@@ -19,111 +18,70 @@ use temporal_client::ClientMetricProvider;
 /// appropriate k/vs have already been set.
 #[derive(Clone)]
 pub(crate) struct MetricsContext {
-    ctx: Context,
-    kvs: Arc<Vec<KeyValue>>,
+    meter: Arc<dyn CoreMeter>,
+    kvs: MetricAttributes,
     instruments: Arc<Instruments>,
 }
 
-/// Wraps OTel's [Meter] to ensure we name our metrics properly, or any other temporal-specific
-/// metrics customizations
-#[derive(derive_more::Constructor)]
-pub struct TemporalMeter<'a> {
-    inner: &'a Meter,
-    metrics_prefix: &'static str,
-}
-
-impl<'a> TemporalMeter<'a> {
-    pub(crate) fn counter(&self, name: &'static str) -> Counter<u64> {
-        self.inner
-            .u64_counter(self.metrics_prefix.to_string() + name)
-            .init()
-    }
-
-    pub(crate) fn histogram(&self, name: &'static str) -> Histogram<u64> {
-        self.inner
-            .u64_histogram(self.metrics_prefix.to_string() + name)
-            .init()
-    }
-}
-
-impl<'a> ClientMetricProvider for TemporalMeter<'a> {
-    fn counter(&self, name: &'static str) -> Counter<u64> {
-        self.counter(name)
-    }
-
-    fn histogram(&self, name: &'static str) -> Histogram<u64> {
-        self.histogram(name)
-    }
-}
-
-impl<'a> Deref for TemporalMeter<'a> {
-    type Target = dyn ClientMetricProvider + 'a;
-
-    fn deref(&self) -> &Self::Target {
-        self as &Self::Target
-    }
-}
-
 struct Instruments {
-    wf_completed_counter: Counter<u64>,
-    wf_canceled_counter: Counter<u64>,
-    wf_failed_counter: Counter<u64>,
-    wf_cont_counter: Counter<u64>,
-    wf_e2e_latency: Histogram<u64>,
-    wf_task_queue_poll_empty_counter: Counter<u64>,
-    wf_task_queue_poll_succeed_counter: Counter<u64>,
-    wf_task_execution_failure_counter: Counter<u64>,
-    wf_task_sched_to_start_latency: Histogram<u64>,
-    wf_task_replay_latency: Histogram<u64>,
-    wf_task_execution_latency: Histogram<u64>,
-    act_poll_no_task: Counter<u64>,
-    act_task_received_counter: Counter<u64>,
-    act_execution_failed: Counter<u64>,
-    act_sched_to_start_latency: Histogram<u64>,
-    act_exec_latency: Histogram<u64>,
-    worker_registered: Counter<u64>,
-    num_pollers: Histogram<u64>,
-    task_slots_available: Histogram<u64>,
-    sticky_cache_hit: Counter<u64>,
-    sticky_cache_miss: Counter<u64>,
-    sticky_cache_size: Histogram<u64>,
-    sticky_cache_evictions: Counter<u64>,
+    wf_completed_counter: Arc<dyn Counter>,
+    wf_canceled_counter: Arc<dyn Counter>,
+    wf_failed_counter: Arc<dyn Counter>,
+    wf_cont_counter: Arc<dyn Counter>,
+    wf_e2e_latency: Arc<dyn Histogram>,
+    wf_task_queue_poll_empty_counter: Arc<dyn Counter>,
+    wf_task_queue_poll_succeed_counter: Arc<dyn Counter>,
+    wf_task_execution_failure_counter: Arc<dyn Counter>,
+    wf_task_sched_to_start_latency: Arc<dyn Histogram>,
+    wf_task_replay_latency: Arc<dyn Histogram>,
+    wf_task_execution_latency: Arc<dyn Histogram>,
+    act_poll_no_task: Arc<dyn Counter>,
+    act_task_received_counter: Arc<dyn Counter>,
+    act_execution_failed: Arc<dyn Counter>,
+    act_sched_to_start_latency: Arc<dyn Histogram>,
+    act_exec_latency: Arc<dyn Histogram>,
+    worker_registered: Arc<dyn Counter>,
+    num_pollers: Arc<dyn Gauge>,
+    task_slots_available: Arc<dyn Gauge>,
+    sticky_cache_hit: Arc<dyn Counter>,
+    sticky_cache_miss: Arc<dyn Counter>,
+    sticky_cache_size: Arc<dyn Gauge>,
+    sticky_cache_evictions: Arc<dyn Counter>,
 }
 
 impl MetricsContext {
     pub(crate) fn no_op() -> Self {
+        let meter = Arc::new(NoOpCoreMeter);
         Self {
-            ctx: Default::default(),
-            kvs: Default::default(),
-            instruments: Arc::new(Instruments::new_explicit(TemporalMeter::new(
-                &NoopMeterProvider::new().meter("fakemeter"),
-                "fakemetrics",
-            ))),
+            kvs: meter.new_attributes(Default::default()),
+            instruments: Arc::new(Instruments::new_explicit(meter.as_ref())),
+            meter,
         }
     }
 
-    pub(crate) fn top_level(namespace: String, telemetry: &TelemetryInstance) -> Self {
-        let kvs = vec![KeyValue::new(KEY_NAMESPACE, namespace)];
-        Self {
-            ctx: Context::current(),
-            kvs: Arc::new(kvs),
-            instruments: Arc::new(Instruments::new(telemetry)),
+    pub(crate) fn top_level(namespace: String, tq: String, telemetry: &TelemetryInstance) -> Self {
+        if let Some(meter) = telemetry.get_metric_meter() {
+            let kvs = meter.new_attributes(MetricsAttributesOptions::new(vec![
+                MetricKeyValue::new(KEY_NAMESPACE, namespace),
+                task_queue(tq),
+            ]));
+            Self {
+                kvs,
+                instruments: Arc::new(Instruments::new(telemetry)),
+                meter,
+            }
+        } else {
+            Self::no_op()
         }
-    }
-
-    pub(crate) fn with_task_q(mut self, tq: String) -> Self {
-        Arc::make_mut(&mut self.kvs).push(task_queue(tq));
-        self
     }
 
     /// Extend an existing metrics context with new attributes
-    pub(crate) fn with_new_attrs(&self, new_kvs: impl IntoIterator<Item = KeyValue>) -> Self {
-        let mut kvs = self.kvs.clone();
-        Arc::make_mut(&mut kvs).extend(new_kvs);
+    pub(crate) fn with_new_attrs(&self, new_kvs: impl IntoIterator<Item = MetricKeyValue>) -> Self {
+        let kvs = self.kvs.with_new_attrs(new_kvs);
         Self {
-            ctx: Context::current(),
             kvs,
             instruments: self.instruments.clone(),
+            meter: self.meter.clone(),
         }
     }
 
@@ -131,113 +89,91 @@ impl MetricsContext {
     pub(crate) fn wf_tq_poll_ok(&self) {
         self.instruments
             .wf_task_queue_poll_succeed_counter
-            .add(&self.ctx, 1, &self.kvs);
+            .add(1, &self.kvs);
     }
 
     /// A workflow task queue poll timed out / had empty response
     pub(crate) fn wf_tq_poll_empty(&self) {
         self.instruments
             .wf_task_queue_poll_empty_counter
-            .add(&self.ctx, 1, &self.kvs);
+            .add(1, &self.kvs);
     }
 
     /// A workflow task execution failed
     pub(crate) fn wf_task_failed(&self) {
         self.instruments
             .wf_task_execution_failure_counter
-            .add(&self.ctx, 1, &self.kvs);
+            .add(1, &self.kvs);
     }
 
     /// A workflow completed successfully
     pub(crate) fn wf_completed(&self) {
-        self.instruments
-            .wf_completed_counter
-            .add(&self.ctx, 1, &self.kvs);
+        self.instruments.wf_completed_counter.add(1, &self.kvs);
     }
 
     /// A workflow ended cancelled
     pub(crate) fn wf_canceled(&self) {
-        self.instruments
-            .wf_canceled_counter
-            .add(&self.ctx, 1, &self.kvs);
+        self.instruments.wf_canceled_counter.add(1, &self.kvs);
     }
 
     /// A workflow ended failed
     pub(crate) fn wf_failed(&self) {
-        self.instruments
-            .wf_failed_counter
-            .add(&self.ctx, 1, &self.kvs);
+        self.instruments.wf_failed_counter.add(1, &self.kvs);
     }
 
     /// A workflow continued as new
     pub(crate) fn wf_continued_as_new(&self) {
-        self.instruments
-            .wf_cont_counter
-            .add(&self.ctx, 1, &self.kvs);
+        self.instruments.wf_cont_counter.add(1, &self.kvs);
     }
 
     /// Record workflow total execution time in milliseconds
     pub(crate) fn wf_e2e_latency(&self, dur: Duration) {
         self.instruments
             .wf_e2e_latency
-            .record(&self.ctx, dur.as_millis() as u64, &self.kvs);
+            .record(dur.as_millis() as u64, &self.kvs);
     }
 
     /// Record workflow task schedule to start time in millis
     pub(crate) fn wf_task_sched_to_start_latency(&self, dur: Duration) {
-        self.instruments.wf_task_sched_to_start_latency.record(
-            &self.ctx,
-            dur.as_millis() as u64,
-            &self.kvs,
-        );
+        self.instruments
+            .wf_task_sched_to_start_latency
+            .record(dur.as_millis() as u64, &self.kvs);
     }
 
     /// Record workflow task execution time in milliseconds
     pub(crate) fn wf_task_latency(&self, dur: Duration) {
-        self.instruments.wf_task_execution_latency.record(
-            &self.ctx,
-            dur.as_millis() as u64,
-            &self.kvs,
-        );
+        self.instruments
+            .wf_task_execution_latency
+            .record(dur.as_millis() as u64, &self.kvs);
     }
 
     /// Record time it takes to catch up on replaying a WFT
     pub(crate) fn wf_task_replay_latency(&self, dur: Duration) {
-        self.instruments.wf_task_replay_latency.record(
-            &self.ctx,
-            dur.as_millis() as u64,
-            &self.kvs,
-        );
+        self.instruments
+            .wf_task_replay_latency
+            .record(dur.as_millis() as u64, &self.kvs);
     }
 
     /// An activity long poll timed out
     pub(crate) fn act_poll_timeout(&self) {
-        self.instruments
-            .act_poll_no_task
-            .add(&self.ctx, 1, &self.kvs);
+        self.instruments.act_poll_no_task.add(1, &self.kvs);
     }
 
     /// A count of activity tasks received
     pub(crate) fn act_task_received(&self) {
-        self.instruments
-            .act_task_received_counter
-            .add(&self.ctx, 1, &self.kvs);
+        self.instruments.act_task_received_counter.add(1, &self.kvs);
     }
 
     /// An activity execution failed
     pub(crate) fn act_execution_failed(&self) {
-        self.instruments
-            .act_execution_failed
-            .add(&self.ctx, 1, &self.kvs);
+        self.instruments.act_execution_failed.add(1, &self.kvs);
     }
 
     /// Record activity task schedule to start time in millis
     pub(crate) fn act_sched_to_start_latency(&self, dur: Duration) {
-        self.instruments.act_sched_to_start_latency.record(
-            &self.ctx,
-            dur.as_millis() as u64,
-            &self.kvs,
-        );
+        self.instruments
+            .act_sched_to_start_latency
+            .record(dur.as_millis() as u64, &self.kvs);
     }
 
     /// Record time it took to complete activity execution, from the time core generated the
@@ -245,72 +181,59 @@ impl MetricsContext {
     pub(crate) fn act_execution_latency(&self, dur: Duration) {
         self.instruments
             .act_exec_latency
-            .record(&self.ctx, dur.as_millis() as u64, &self.kvs);
+            .record(dur.as_millis() as u64, &self.kvs);
     }
 
     /// A worker was registered
     pub(crate) fn worker_registered(&self) {
-        self.instruments
-            .worker_registered
-            .add(&self.ctx, 1, &self.kvs);
+        self.instruments.worker_registered.add(1, &self.kvs);
     }
 
     /// Record current number of available task slots. Context should have worker type set.
     pub(crate) fn available_task_slots(&self, num: usize) {
         self.instruments
             .task_slots_available
-            .record(&self.ctx, num as u64, &self.kvs)
+            .record(num as u64, &self.kvs)
     }
 
     /// Record current number of pollers. Context should include poller type / task queue tag.
     pub(crate) fn record_num_pollers(&self, num: usize) {
-        self.instruments
-            .num_pollers
-            .record(&self.ctx, num as u64, &self.kvs);
+        self.instruments.num_pollers.record(num as u64, &self.kvs);
     }
 
     /// A workflow task found a cached workflow to run against
     pub(crate) fn sticky_cache_hit(&self) {
-        self.instruments
-            .sticky_cache_hit
-            .add(&self.ctx, 1, &self.kvs);
+        self.instruments.sticky_cache_hit.add(1, &self.kvs);
     }
 
     /// A workflow task did not find a cached workflow
     pub(crate) fn sticky_cache_miss(&self) {
-        self.instruments
-            .sticky_cache_miss
-            .add(&self.ctx, 1, &self.kvs);
+        self.instruments.sticky_cache_miss.add(1, &self.kvs);
     }
 
     /// Record current cache size (in number of wfs, not bytes)
     pub(crate) fn cache_size(&self, size: u64) {
-        self.instruments
-            .sticky_cache_size
-            .record(&self.ctx, size, &self.kvs);
+        self.instruments.sticky_cache_size.record(size, &self.kvs);
     }
 
     /// Count a workflow being evicted from the cache
     pub(crate) fn cache_eviction(&self) {
         self.instruments
             .sticky_cache_evictions
-            .add(&self.ctx, 1, &self.kvs);
+            .add(1, &self.kvs);
     }
 }
 
 impl Instruments {
     fn new(telem: &TelemetryInstance) -> Self {
-        let no_op_meter: Meter;
-        let meter = if let Some(meter) = telem.get_metric_meter() {
-            meter
+        if let Some(meter) = telem.get_metric_meter() {
+            Self::new_explicit(meter.as_ref())
         } else {
-            no_op_meter = NoopMeterProvider::default().meter("no_op");
-            TemporalMeter::new(&no_op_meter, "fakemetrics")
-        };
-        Self::new_explicit(meter)
+            Self::new_explicit(&NoOpCoreMeter)
+        }
     }
 
-    fn new_explicit(meter: TemporalMeter) -> Self {
+    fn new_explicit(meter: &dyn CoreMeter) -> Self {
         Self {
             wf_completed_counter: meter.counter("workflow_completed"),
             wf_canceled_counter: meter.counter("workflow_canceled"),
@@ -330,11 +253,11 @@ impl Instruments {
             act_exec_latency: meter.histogram(ACT_EXEC_LATENCY_NAME),
             // name kept as worker start for compat with old sdk / what users expect
             worker_registered: meter.counter("worker_start"),
-            num_pollers: meter.histogram(NUM_POLLERS_NAME),
-            task_slots_available: meter.histogram(TASK_SLOTS_AVAILABLE_NAME),
+            num_pollers: meter.gauge(NUM_POLLERS_NAME),
+            task_slots_available: meter.gauge(TASK_SLOTS_AVAILABLE_NAME),
             sticky_cache_hit: meter.counter("sticky_cache_hit"),
             sticky_cache_miss: meter.counter("sticky_cache_miss"),
-            sticky_cache_size: meter.histogram(STICKY_CACHE_SIZE_NAME),
+            sticky_cache_size: meter.gauge(STICKY_CACHE_SIZE_NAME),
             sticky_cache_evictions: meter.counter("sticky_cache_total_forced_eviction"),
         }
     }
@@ -348,35 +271,35 @@ const KEY_POLLER_TYPE: &str = "poller_type";
 const KEY_WORKER_TYPE: &str = "worker_type";
 const KEY_EAGER: &str = "eager";
 
-pub(crate) fn workflow_poller() -> KeyValue {
-    KeyValue::new(KEY_POLLER_TYPE, "workflow_task")
+pub(crate) fn workflow_poller() -> MetricKeyValue {
+    MetricKeyValue::new(KEY_POLLER_TYPE, "workflow_task")
 }
-pub(crate) fn workflow_sticky_poller() -> KeyValue {
-    KeyValue::new(KEY_POLLER_TYPE, "sticky_workflow_task")
+pub(crate) fn workflow_sticky_poller() -> MetricKeyValue {
+    MetricKeyValue::new(KEY_POLLER_TYPE, "sticky_workflow_task")
 }
-pub(crate) fn activity_poller() -> KeyValue {
-    KeyValue::new(KEY_POLLER_TYPE, "activity_task")
+pub(crate) fn activity_poller() -> MetricKeyValue {
+    MetricKeyValue::new(KEY_POLLER_TYPE, "activity_task")
 }
-pub(crate) fn task_queue(tq: String) -> KeyValue {
-    KeyValue::new(KEY_TASK_QUEUE, tq)
+pub(crate) fn task_queue(tq: String) -> MetricKeyValue {
+    MetricKeyValue::new(KEY_TASK_QUEUE, tq)
 }
-pub(crate) fn activity_type(ty: String) -> KeyValue {
-    KeyValue::new(KEY_ACT_TYPE, ty)
+pub(crate) fn activity_type(ty: String) -> MetricKeyValue {
+    MetricKeyValue::new(KEY_ACT_TYPE, ty)
 }
-pub(crate) fn workflow_type(ty: String) -> KeyValue {
-    KeyValue::new(KEY_WF_TYPE, ty)
+pub(crate) fn workflow_type(ty: String) -> MetricKeyValue {
+    MetricKeyValue::new(KEY_WF_TYPE, ty)
 }
-pub(crate) fn workflow_worker_type() -> KeyValue {
-    KeyValue::new(KEY_WORKER_TYPE, "WorkflowWorker")
+pub(crate) fn workflow_worker_type() -> MetricKeyValue {
+    MetricKeyValue::new(KEY_WORKER_TYPE, "WorkflowWorker")
 }
-pub(crate) fn activity_worker_type() -> KeyValue {
-    KeyValue::new(KEY_WORKER_TYPE, "ActivityWorker")
+pub(crate) fn activity_worker_type() -> MetricKeyValue {
+    MetricKeyValue::new(KEY_WORKER_TYPE, "ActivityWorker")
 }
-pub(crate) fn local_activity_worker_type() -> KeyValue {
-    KeyValue::new(KEY_WORKER_TYPE, "LocalActivityWorker")
+pub(crate) fn local_activity_worker_type() -> MetricKeyValue {
+    MetricKeyValue::new(KEY_WORKER_TYPE, "LocalActivityWorker")
 }
-pub(crate) fn eager(is_eager: bool) -> KeyValue {
-    KeyValue::new(KEY_EAGER, is_eager)
+pub(crate) fn eager(is_eager: bool) -> MetricKeyValue {
+    MetricKeyValue::new(KEY_EAGER, is_eager)
 }
 
 const WF_E2E_LATENCY_NAME: &str = "workflow_endtoend_latency";
@@ -427,6 +350,22 @@ static TASK_SCHED_TO_START_MS_BUCKETS: &[f64] =
 /// broadly it's trying to represent latencies in millis.
 pub(super) static DEFAULT_MS_BUCKETS: &[f64] = &[50., 100., 500., 1000., 2500., 10_000.];
 
+/// Returns the default histogram buckets that lang should use for a given metric name if they
+/// have not been overridden by the user.
+///
+/// The name must *not* be prefixed with `temporal_`
+pub fn default_buckets_for(histo_name: &str) -> &'static [f64] {
+    match histo_name {
+        WF_E2E_LATENCY_NAME => WF_LATENCY_MS_BUCKETS,
+        WF_TASK_EXECUTION_LATENCY_NAME | WF_TASK_REPLAY_LATENCY_NAME => WF_TASK_MS_BUCKETS,
+        WF_TASK_SCHED_TO_START_LATENCY_NAME | ACT_SCHED_TO_START_LATENCY_NAME => {
+            TASK_SCHED_TO_START_MS_BUCKETS
+        }
+        ACT_EXEC_LATENCY_NAME => ACT_EXE_MS_BUCKETS,
+        _ => DEFAULT_MS_BUCKETS,
+    }
+}
+
 /// Chooses appropriate aggregators for our metrics
 #[derive(Debug, Clone)]
 pub struct SDKAggSelector {
@@ -445,6 +384,7 @@ impl AggregatorSelector for SDKAggSelector {
                 .name()
                 .strip_prefix(self.metric_prefix)
                 .unwrap_or_else(|| descriptor.name());
+
             // Some recorders are just gauges
             match dname {
                 STICKY_CACHE_SIZE_NAME | NUM_POLLERS_NAME | TASK_SLOTS_AVAILABLE_NAME => {
@@ -454,15 +394,7 @@ impl AggregatorSelector for SDKAggSelector {
             }
 
             // Other recorders will select their appropriate buckets
-            let buckets = match dname {
-                WF_E2E_LATENCY_NAME => WF_LATENCY_MS_BUCKETS,
-                WF_TASK_EXECUTION_LATENCY_NAME | WF_TASK_REPLAY_LATENCY_NAME => WF_TASK_MS_BUCKETS,
-                WF_TASK_SCHED_TO_START_LATENCY_NAME | ACT_SCHED_TO_START_LATENCY_NAME => {
-                    TASK_SCHED_TO_START_MS_BUCKETS
-                }
-                ACT_EXEC_LATENCY_NAME => ACT_EXE_MS_BUCKETS,
-                _ => DEFAULT_MS_BUCKETS,
-            };
+            let buckets = default_buckets_for(dname);
             return Some(Arc::new(histogram(buckets)));
         }
 

@@ -14,7 +14,7 @@ use crossbeam::channel::Receiver;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use opentelemetry::{
-    metrics::{Meter, MeterProvider},
+    metrics::MeterProvider,
     runtime,
     sdk::{
         export::metrics::aggregation::{self, Temporality, TemporalitySelector},
@@ -38,6 +38,7 @@ use std::{
     time::Duration,
 };
 use temporal_sdk_core_api::telemetry::{
+    metrics::{CoreMeter, PrefixedMetricsMeter},
     CoreLog, CoreTelemetry, Logger, MetricTemporality, MetricsExporter, OtelCollectorOptions,
     TelemetryOptions, TraceExporter,
 };
@@ -59,7 +60,7 @@ pub fn construct_filter_string(core_level: Level, other_level: Level) -> String 
 pub struct TelemetryInstance {
     metric_prefix: &'static str,
     logs_out: Option<Mutex<CoreLogsOut>>,
-    metrics: Option<(Box<dyn MeterProvider + Send + Sync + 'static>, Meter)>,
+    metrics: Option<Arc<dyn CoreMeter + 'static>>,
     trace_subscriber: Arc<dyn Subscriber + Send + Sync>,
     prom_binding: Option<SocketAddr>,
     _keepalive_rx: Receiver<()>,
@@ -70,14 +71,10 @@ impl TelemetryInstance {
         trace_subscriber: Arc<dyn Subscriber + Send + Sync>,
         logs_out: Option<Mutex<CoreLogsOut>>,
         metric_prefix: &'static str,
-        mut meter_provider: Option<Box<dyn MeterProvider + Send + Sync + 'static>>,
+        metrics: Option<Arc<dyn CoreMeter + 'static>>,
         prom_binding: Option<SocketAddr>,
         keepalive_rx: Receiver<()>,
     ) -> Self {
-        let metrics = meter_provider.take().map(|mp| {
-            let meter = mp.meter(TELEM_SERVICE_NAME);
-            (mp, meter)
-        });
         Self {
             metric_prefix,
             logs_out,
@@ -99,11 +96,11 @@ impl TelemetryInstance {
         self.prom_binding
     }
 
-    /// Returns our wrapper for OTel metric meters, can be used to, ex: initialize clients
-    pub fn get_metric_meter(&self) -> Option<TemporalMeter> {
-        self.metrics
-            .as_ref()
-            .map(|(_, m)| TemporalMeter::new(m, self.metric_prefix))
+    /// Returns our wrapper for metric meters, can be used to, ex: initialize clients
+    pub fn get_metric_meter(&self) -> Option<Arc<dyn CoreMeter>> {
+        self.metrics.clone().map(|m| {
+            Arc::new(PrefixedMetricsMeter::new(self.metric_prefix, m)) as Arc<dyn CoreMeter>
+        })
     }
 }
 
@@ -232,7 +229,7 @@ pub fn telemetry_init(opts: TelemetryOptions) -> Result<TelemetryInstance, anyho
                     prom_binding = Some(srv.bound_addr());
                     let mp = srv.exporter.meter_provider()?;
                     runtime.spawn(async move { srv.run().await });
-                    Some(Box::new(mp) as Box<dyn MeterProvider + Send + Sync>)
+                    Some(Arc::new(mp.meter(TELEM_SERVICE_NAME)) as Arc<dyn CoreMeter>)
                 }
                 MetricsExporter::Otel(OtelCollectorOptions {
                     url,
@@ -255,9 +252,10 @@ pub fn telemetry_init(opts: TelemetryOptions) -> Result<TelemetryInstance, anyho
                         )
                         .build()?;
                     Ok::<_, anyhow::Error>(Some(
-                        Box::new(metrics) as Box<dyn MeterProvider + Send + Sync>
+                        Arc::new(metrics.meter(TELEM_SERVICE_NAME)) as Arc<dyn CoreMeter>
                     ))
                 })?,
+                MetricsExporter::Lang(cm) => Some(cm.clone()),
             }
         } else {
             None
@@ -401,7 +399,7 @@ pub mod test_initters {
         .unwrap();
     }
 }
-use crate::telemetry::metrics::TemporalMeter;
+
 #[cfg(test)]
 pub use test_initters::*;
 

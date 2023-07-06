@@ -88,7 +88,7 @@ use temporal_sdk_core_protos::{
         common::NamespacedWorkflowExecution,
         workflow_activation::{
             resolve_child_workflow_execution_start::Status as ChildWorkflowStartStatus,
-            workflow_activation_job::Variant, WorkflowActivation,
+            workflow_activation_job::Variant, StartWorkflow, WorkflowActivation,
         },
         workflow_commands::{workflow_command, ContinueAsNewWorkflowExecution},
         workflow_completion::WorkflowActivationCompletion,
@@ -236,6 +236,9 @@ impl Worker {
         );
         let (wf_future_tx, wf_future_rx) = unbounded_channel();
         let (completions_tx, completions_rx) = unbounded_channel();
+
+        // Run workflow futures to completion.
+        // Workflow futures are sent into this channel by the workflow activation polling loop.
         let wf_future_joiner = async {
             UnboundedReceiverStream::new(wf_future_rx)
                 .map(Result::<_, anyhow::Error>::Ok)
@@ -257,6 +260,9 @@ impl Worker {
                 .await
                 .context("Workflow futures encountered an error")
         };
+
+        // Send completion responses back to the server.
+        // Completions are sent to this channel by workflow activation handlers.
         let wf_completion_processor = async {
             UnboundedReceiverStream::new(completions_rx)
                 .map(Ok)
@@ -270,6 +276,12 @@ impl Worker {
                 .await
                 .context("Workflow completions processor encountered an error")
         };
+
+        // Poll for workflow activations. Send each activation into the
+        // activation channel of the workflow future corresponding to the
+        // activation run_id. If the activation was for a new workflow
+        // execution, then send the newly created workflow future into
+        // `workflow_future_joiner`.
         let wf_activation_polling_loop = async {
             loop {
                 let activation = match common.worker.poll_workflow_activation().await {
@@ -300,9 +312,11 @@ impl Worker {
             drop(completions_tx);
             Result::<_, anyhow::Error>::Ok(())
         };
-        // Only poll on the activity queue if activity functions have been registered. This
-        // makes tests which use mocks dramatically more manageable.
+
+        // Poll for activity tasks. Spawn a handler task for each activity task received.
         let activity_task_polling_loop = async {
+            // Only poll on the activity queue if activity functions have been registered. This
+            // makes tests which use mocks dramatically more manageable.
             if !act_half.activity_fns.is_empty() {
                 loop {
                     let activity = common.worker.poll_activity_task().await;
@@ -385,52 +399,27 @@ impl WorkflowHalf {
         Option<WorkflowFutureHandle<impl Future<Output = Result<WorkflowResult<()>, JoinError>>>>,
         anyhow::Error,
     > {
-        let mut res = None;
         let run_id = activation.run_id.clone();
 
         // If the activation is to start a workflow, create a new workflow driver for it,
         // using the function associated with that workflow id
-        if let Some(sw) = activation.jobs.iter().find_map(|j| match j.variant {
+        let wf_fut_handle = if let Some(sw) = activation.jobs.iter().find_map(|j| match j.variant {
             Some(Variant::StartWorkflow(ref sw)) => Some(sw),
             _ => None,
         }) {
-            let workflow_type = &sw.workflow_type;
-            let wf_fns_borrow = self.workflow_fns.borrow();
-            let wf_function = wf_fns_borrow
-                .get(workflow_type)
-                .ok_or_else(|| anyhow!("Workflow type {workflow_type} not found"))?;
-
-            let (wff, activations) = wf_function.start_workflow(
-                common.worker.get_config().namespace.clone(),
-                common.task_queue.clone(),
-                // NOTE: Don't clone args if this gets ported to be a non-test rust worker
-                sw.arguments.clone(),
-                completions_tx.clone(),
-            );
-            let jh = tokio::spawn(async move {
-                tokio::select! {
-                    r = wff.fuse() => r,
-                    // TODO: This probably shouldn't abort early, as it could cause an in-progress
-                    //  complete to abort. Send synthetic remove activation
-                    _ = shutdown_token.cancelled() => {
-                        Ok(WfExitValue::Evicted)
-                    }
-                }
-            });
-            res = Some(WorkflowFutureHandle {
-                join_handle: jh,
-                run_id: run_id.clone(),
-            });
-            self.workflows.borrow_mut().insert(
+            Some(self.register_new_workflow_execution(
                 run_id.clone(),
-                WorkflowData {
-                    activation_chan: activations,
-                },
-            );
-        }
+                common,
+                shutdown_token,
+                completions_tx,
+                sw,
+            )?)
+        } else {
+            None
+        };
 
-        // The activation is expected to apply to some workflow we know about. Use it to
-        // unblock things and advance the workflow.
+        // The activation run_id should refer to some workflow we know about.
+        // Use it to unblock things and advance the workflow.
         if let Some(dat) = self.workflows.borrow_mut().get_mut(&run_id) {
             dat.activation_chan
                 .send(activation)
@@ -443,7 +432,54 @@ impl WorkflowHalf {
             );
         };
 
-        Ok(res)
+        Ok(wf_fut_handle)
+    }
+
+    /// Register a new workflow execution, returning a handle to the workflow future.
+    fn register_new_workflow_execution(
+        &self,
+        run_id: String,
+        common: &CommonWorker,
+        shutdown_token: CancellationToken,
+        completions_tx: &UnboundedSender<WorkflowActivationCompletion>,
+        sw: &StartWorkflow,
+    ) -> Result<
+        WorkflowFutureHandle<impl Future<Output = Result<WorkflowResult<()>, JoinError>>>,
+        anyhow::Error,
+    > {
+        let workflow_type = &sw.workflow_type;
+        let wf_fns_borrow = self.workflow_fns.borrow();
+        let wf_function = wf_fns_borrow
+            .get(workflow_type)
+            .ok_or_else(|| anyhow!("Workflow type {workflow_type} not found"))?;
+
+        let (wff, activations) = wf_function.start_workflow(
+            common.worker.get_config().namespace.clone(),
+            common.task_queue.clone(),
+            // NOTE: Don't clone args if this gets ported to be a non-test rust worker
+            sw.arguments.clone(),
+            completions_tx.clone(),
+        );
+        let jh = tokio::spawn(async move {
+            tokio::select! {
+                r = wff.fuse() => r,
+                // TODO: This probably shouldn't abort early, as it could cause an in-progress
+                //  complete to abort. Send synthetic remove activation
+                _ = shutdown_token.cancelled() => {
+                    Ok(WfExitValue::Evicted)
+                }
+            }
+        });
+        self.workflows.borrow_mut().insert(
+            run_id.clone(),
+            WorkflowData {
+                activation_chan: activations,
+            },
+        );
+        Ok(WorkflowFutureHandle {
+            join_handle: jh,
+            run_id: run_id.clone(),
+        })
     }
 }
 

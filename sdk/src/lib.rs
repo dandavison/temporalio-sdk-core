@@ -270,59 +270,58 @@ impl Worker {
                 .await
                 .context("Workflow completions processor encountered an error")
         };
-        tokio::try_join!(
-            // Workflow polling loop
-            async {
-                loop {
-                    let activation = match common.worker.poll_workflow_activation().await {
-                        Err(PollWfError::ShutDown) => {
-                            break;
-                        }
-                        o => o?,
-                    };
-                    if let Some(ref i) = common.worker_interceptor {
-                        i.on_workflow_activation(&activation).await?;
+        let wf_activation_polling_loop = async {
+            loop {
+                let activation = match common.worker.poll_workflow_activation().await {
+                    Err(PollWfError::ShutDown) => {
+                        break;
                     }
-                    if let Some(wf_fut) = wf_half.workflow_activation_handler(
-                        common,
-                        shutdown_token.clone(),
-                        activation,
-                        &completions_tx,
-                    )? {
-                        if wf_future_tx.send(wf_fut).is_err() {
-                            panic!(
-                                "Receive half of completion processor channel cannot be dropped"
-                            );
-                        }
+                    o => o?,
+                };
+                if let Some(ref i) = common.worker_interceptor {
+                    i.on_workflow_activation(&activation).await?;
+                }
+                if let Some(wf_fut) = wf_half.workflow_activation_handler(
+                    common,
+                    shutdown_token.clone(),
+                    activation,
+                    &completions_tx,
+                )? {
+                    if wf_future_tx.send(wf_fut).is_err() {
+                        panic!("Receive half of completion processor channel cannot be dropped");
                     }
                 }
-                // Tell still-alive workflows to evict themselves
-                shutdown_token.cancel();
-                // It's important to drop these so the future and completion processors will
-                // terminate.
-                drop(wf_future_tx);
-                drop(completions_tx);
-                Result::<_, anyhow::Error>::Ok(())
-            },
-            // Only poll on the activity queue if activity functions have been registered. This
-            // makes tests which use mocks dramatically more manageable.
-            async {
-                if !act_half.activity_fns.is_empty() {
-                    loop {
-                        let activity = common.worker.poll_activity_task().await;
-                        if matches!(activity, Err(PollActivityError::ShutDown)) {
-                            break;
-                        }
-                        act_half.activity_task_handler(
-                            common.worker.clone(),
-                            safe_app_data.clone(),
-                            common.task_queue.clone(),
-                            activity?,
-                        )?;
+            }
+            // Tell still-alive workflows to evict themselves
+            shutdown_token.cancel();
+            // It's important to drop these so the future and completion processors will
+            // terminate.
+            drop(wf_future_tx);
+            drop(completions_tx);
+            Result::<_, anyhow::Error>::Ok(())
+        };
+        // Only poll on the activity queue if activity functions have been registered. This
+        // makes tests which use mocks dramatically more manageable.
+        let activity_task_polling_loop = async {
+            if !act_half.activity_fns.is_empty() {
+                loop {
+                    let activity = common.worker.poll_activity_task().await;
+                    if matches!(activity, Err(PollActivityError::ShutDown)) {
+                        break;
                     }
-                };
-                Result::<_, anyhow::Error>::Ok(())
-            },
+                    act_half.activity_task_handler(
+                        common.worker.clone(),
+                        safe_app_data.clone(),
+                        common.task_queue.clone(),
+                        activity?,
+                    )?;
+                }
+            };
+            Result::<_, anyhow::Error>::Ok(())
+        };
+        tokio::try_join!(
+            wf_activation_polling_loop,
+            activity_task_polling_loop,
             wf_future_joiner,
             wf_completion_processor,
         )?;

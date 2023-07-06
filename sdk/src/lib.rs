@@ -137,7 +137,7 @@ struct CommonWorker {
 }
 
 struct WorkflowHalf {
-    /// Maps run id to cached workflow state
+    /// Maps run id to workflow activation channel
     workflows: RefCell<HashMap<String, WorkflowData>>,
     /// Maps workflow type to the function for executing workflow runs with that ID
     workflow_fns: RefCell<HashMap<String, WorkflowFunction>>,

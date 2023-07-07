@@ -266,15 +266,9 @@ impl WorkflowFuture {
         &mut self,
         run_id: &str,
         cx: &mut Context<'_>,
-    ) -> Result<
-        Option<(
-            Vec<workflow_command::Variant>,
-            Option<Poll<Result<WfExitValue<()>, Error>>>,
-        )>,
-        Error,
-    > {
+        wf_function_poll_result: &mut Poll<Result<WfExitValue<()>, Error>>,
+    ) -> Result<Option<Vec<workflow_command::Variant>>, Error> {
         let mut activation_cmds = vec![];
-        let mut res = None;
         while let Ok(cmd) = self.incoming_commands.try_recv() {
             match cmd {
                 RustWfCmd::Cancel(cancellable_id) => {
@@ -284,7 +278,7 @@ impl WorkflowFuture {
                                 .push(workflow_command::Variant::CancelTimer(CancelTimer { seq }));
                             self.unblock(UnblockEvent::Timer(seq, TimerResult::Cancelled))?;
                             // Re-poll wf future since a timer is now unblocked
-                            res = Some(self.inner.poll_unpin(cx));
+                            *wf_function_poll_result = self.inner.poll_unpin(cx);
                         }
                         CancellableID::Activity(seq) => {
                             activation_cmds.push(workflow_command::Variant::RequestCancelActivity(
@@ -391,7 +385,7 @@ impl WorkflowFuture {
                             let _ = chan.send(input);
                         }
                         // Re-poll wf future since signals may be unblocked
-                        res = Some(self.inner.poll_unpin(cx));
+                        *wf_function_poll_result = self.inner.poll_unpin(cx);
                     }
                     self.sig_chans.insert(signame, SigChanOrBuffer::Chan(chan));
                 }
@@ -401,7 +395,7 @@ impl WorkflowFuture {
                 }
             }
         }
-        Ok(Some((activation_cmds, res)))
+        Ok(Some(activation_cmds))
     }
 
     fn get_workflow_exit_activation_command(
@@ -434,6 +428,14 @@ impl WorkflowFuture {
 impl Future for WorkflowFuture {
     type Output = WorkflowResult<()>;
 
+    /// For every incoming activation, handle every job in the activation,
+    /// advance the inner workflow function, and send a completion response.
+    ///
+    /// Return Poll::Ready if an activation, or the result of handling an
+    /// activation job, indicates that the workflow should be evicted (or if the
+    /// activation channel is lost).
+    ///
+    /// Return Poll::Pending if all incoming activations have been handled.
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         'activations: loop {
             // WF must always receive an activation first before responding with commands
@@ -482,41 +484,36 @@ impl Future for WorkflowFuture {
                 return Ok(WfExitValue::Evicted).into();
             }
 
-            let mut wf_function_poll_result = match self.poll_inner(&run_id, cx) {
-                Some(res) => res,
-                None => continue 'activations,
-            };
-
-            let mut activation_cmds =
-                match self.get_activation_commands_from_incoming_commands(&run_id, cx)? {
-                    Some((activation_cmds, new_res)) => {
-                        if let Some(new_res) = new_res {
-                            wf_function_poll_result = new_res
-                        }
-                        activation_cmds
+            if let Some(mut wf_fn_poll_result) = self.poll_inner(&run_id, cx) {
+                if let Some(mut activation_cmds) = self
+                    .get_activation_commands_from_incoming_commands(
+                        &run_id,
+                        cx,
+                        // Overwritten if activation commands mandate polling the workflow function again:
+                        &mut wf_fn_poll_result,
+                    )?
+                {
+                    if let Poll::Ready(res) = wf_fn_poll_result {
+                        // TODO: Auto reply with cancel when cancelled (instead of normal exit value)
+                        activation_cmds.push(Self::get_workflow_exit_activation_command(res))
                     }
-                    None => continue 'activations,
-                };
 
-            if let Poll::Ready(res) = wf_function_poll_result {
-                // TODO: Auto reply with cancel when cancelled (instead of normal exit value)
-                activation_cmds.push(Self::get_workflow_exit_activation_command(res))
+                    // TODO: deadlock detector
+                    // Check if there's nothing to unblock and workflow has not completed.
+                    // This is different from the assertion that was here before that checked that WF did
+                    // not produce any commands which is completely viable in the case WF is waiting on
+                    // multiple completions.
+
+                    self.send_completion(run_id, activation_cmds);
+
+                    if die_of_eviction_when_done {
+                        return Ok(WfExitValue::Evicted).into();
+                    }
+
+                    // We don't actually return here, since we could be queried after finishing executing,
+                    // and it allows us to rely on evictions for death and cache management
+                }
             }
-
-            // TODO: deadlock detector
-            // Check if there's nothing to unblock and workflow has not completed.
-            // This is different from the assertion that was here before that checked that WF did
-            // not produce any commands which is completely viable in the case WF is waiting on
-            // multiple completions.
-
-            self.send_completion(run_id, activation_cmds);
-
-            if die_of_eviction_when_done {
-                return Ok(WfExitValue::Evicted).into();
-            }
-
-            // We don't actually return here, since we could be queried after finishing executing,
-            // and it allows us to rely on evictions for death and cache management
         }
     }
 }

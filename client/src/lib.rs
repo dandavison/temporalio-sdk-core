@@ -69,7 +69,7 @@ use tonic::{
     transport::{Certificate, Channel, Endpoint, Identity},
     Code, Status,
 };
-use tower::ServiceBuilder;
+use tower::{make::MakeConnection, ServiceBuilder};
 use url::Url;
 use uuid::Uuid;
 
@@ -288,6 +288,18 @@ impl<C> DerefMut for ConfiguredClient<C> {
     }
 }
 
+struct CustomResolverConnector {}
+
+impl MakeConnection for CustomResolverConnector {
+    fn make_connection(&mut self, target: Target) -> Self::Future {}
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+    }
+}
+
 impl ClientOptions {
     /// Attempt to establish a connection to the Temporal server in a specific namespace. The
     /// returned client is bound to that namespace.
@@ -323,7 +335,8 @@ impl ClientOptions {
         } else {
             channel
         };
-        let channel = channel.connect().await?;
+        let connector = CustomResolverConnector::new();
+        let channel = channel.connect_with_connector(connector).await?;
         let service = ServiceBuilder::new()
             .layer_fn(|channel| GrpcMetricSvc {
                 inner: channel,

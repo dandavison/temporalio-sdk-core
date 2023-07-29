@@ -14,6 +14,7 @@ mod workflow_handle;
 
 pub use crate::retry::{CallType, RetryClient, RETRYABLE_ERROR_CODES};
 pub use metrics::ClientMetricProvider;
+use metrics::MetricsContext;
 pub use raw::{HealthService, OperatorService, TestService, WorkflowService};
 pub use temporal_sdk_core_protos::temporal::api::{
     enums::v1::ArchivalState,
@@ -24,21 +25,24 @@ pub use temporal_sdk_core_protos::temporal::api::{
     },
 };
 pub use tonic;
+use tower::ServiceBuilder;
 pub use workflow_handle::{WorkflowExecutionInfo, WorkflowExecutionResult};
 
 use crate::{
-    metrics::{GrpcMetricSvc, MetricsContext},
+    metrics::GrpcMetricSvc,
     raw::{sealed::RawClientLike, AttachMetricLabels},
     sealed::WfHandleClient,
     workflow_handle::UntypedWorkflowHandle,
 };
 use backoff::{exponential, ExponentialBackoff, SystemClock};
+use ginepro::LoadBalancedChannel;
 use http::{uri::InvalidUri, Uri};
 use once_cell::sync::OnceCell;
 use parking_lot::RwLock;
 use std::{
     collections::HashMap,
     fmt::{Debug, Formatter},
+    net::{IpAddr, Ipv4Addr},
     ops::{Deref, DerefMut},
     str::FromStr,
     sync::Arc,
@@ -66,10 +70,9 @@ use tonic::{
     codegen::InterceptedService,
     metadata::{MetadataKey, MetadataValue},
     service::Interceptor,
-    transport::{Certificate, Channel, Endpoint, Identity},
+    transport::{Certificate, Identity},
     Code, Status,
 };
-use tower::ServiceBuilder;
 use url::Url;
 use uuid::Uuid;
 
@@ -242,6 +245,9 @@ pub enum ClientInitError {
     /// server capabilities / verify server is responding.
     #[error("`get_system_info` call error after connection: {0:?}")]
     SystemInfoCallError(tonic::Status),
+    /// Some other error occurred while establishing the connection to server.
+    #[error("Error while establishing connection to server: {0:?}")]
+    OtherError(anyhow::Error),
 }
 
 /// A client with [ClientOptions] attached, which can be passed to initialize workers,
@@ -316,20 +322,36 @@ impl ClientOptions {
         headers: Option<Arc<RwLock<HashMap<String, String>>>>,
     ) -> Result<RetryClient<ConfiguredClient<TemporalServiceClientWithMetrics>>, ClientInitError>
     {
-        let channel = Channel::from_shared(self.target_url.to_string())?;
-        let channel = self.add_tls_to_channel(channel).await?;
-        let channel = if let Some(origin) = self.override_origin.clone() {
-            channel.origin(origin)
-        } else {
-            channel
-        };
-        let channel = channel.connect().await?;
+        let mut builder = LoadBalancedChannel::builder((
+            self.target_url.host_str().unwrap().to_string(),
+            self.target_url.port().unwrap(),
+        ));
+        if let Some(tls_cfg) = self.make_tonic_tls_cfg() {
+            builder = builder.with_tls(tls_cfg)
+        }
+
+        // TODO (dan): Remove before merging. This is for testing against a local DNS server.
+        if let Ok(true) =
+            std::env::var("SDK_CORE_USE_LOCAL_DNS_SERVER").map(|s| !s.trim().is_empty())
+        {
+            builder = builder.lookup_service(ginepro::DnsResolver::from_ip_and_port(
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                53,
+            ));
+        }
+
+        let channel = builder
+            .channel()
+            .await
+            .or_else(|err| Err(ClientInitError::OtherError(err)))?;
+
         let service = ServiceBuilder::new()
             .layer_fn(|channel| GrpcMetricSvc {
                 inner: channel,
                 metrics: metrics_meter.map(|mm| MetricsContext::new(vec![], mm)),
             })
             .service(channel);
+
         let headers = headers.unwrap_or_default();
         let interceptor = ServiceCallInterceptor {
             opts: self.clone(),
@@ -358,9 +380,8 @@ impl ClientOptions {
         Ok(RetryClient::new(client, self.retry_config.clone()))
     }
 
-    /// If TLS is configured, set the appropriate options on the provided channel and return it.
-    /// Passes it through if TLS options not set.
-    async fn add_tls_to_channel(&self, mut channel: Endpoint) -> Result<Endpoint, ClientInitError> {
+    /// If TLS is configured, set some additional options and return the tonic TLS config.
+    fn make_tonic_tls_cfg(&self) -> Option<tonic::transport::ClientTlsConfig> {
         if let Some(tls_cfg) = &self.tls_cfg {
             let mut tls = tonic::transport::ClientTlsConfig::new();
 
@@ -376,8 +397,9 @@ impl ClientOptions {
                 // up correct on requests while we use TLS. Setting the header directly in our
                 // interceptor doesn't work since seemingly it is overridden at some point by
                 // something lower level.
-                let uri: Uri = format!("https://{}", domain).parse()?;
-                channel = channel.origin(uri);
+                // TODO (dan): check that the correct header is being sent under ginepro
+                // let uri: Uri = format!("https://{}", domain).parse()?;
+                // endpoint = endpoint.origin(uri);
             }
 
             if let Some(client_opts) = &tls_cfg.client_tls_config {
@@ -385,10 +407,10 @@ impl ClientOptions {
                     Identity::from_pem(&client_opts.client_cert, &client_opts.client_private_key);
                 tls = tls.identity(client_identity);
             }
-
-            return channel.tls_config(tls).map_err(Into::into);
+            Some(tls)
+        } else {
+            None
         }
-        Ok(channel)
     }
 }
 

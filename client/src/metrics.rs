@@ -1,5 +1,6 @@
 use crate::{AttachMetricLabels, LONG_POLL_METHOD_NAMES};
 use futures::{future::BoxFuture, FutureExt};
+use ginepro::LoadBalancedChannel;
 use opentelemetry::{
     metrics::{Counter, Histogram},
     KeyValue,
@@ -9,7 +10,7 @@ use std::{
     task::{Context, Poll},
     time::{Duration, Instant},
 };
-use tonic::{body::BoxBody, transport::Channel};
+use tonic::body::BoxBody;
 use tower::Service;
 
 /// Used to track context associated with metrics, and record/update them
@@ -119,7 +120,7 @@ pub(crate) fn svc_operation(op: String) -> KeyValue {
 /// Implements metrics functionality for gRPC (really, any http) calls
 #[derive(Debug, Clone)]
 pub struct GrpcMetricSvc {
-    pub(crate) inner: Channel,
+    pub(crate) inner: LoadBalancedChannel,
     // If set to none, metrics are a no-op
     pub(crate) metrics: Option<MetricsContext>,
 }

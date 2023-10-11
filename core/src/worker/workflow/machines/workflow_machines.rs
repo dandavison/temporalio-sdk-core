@@ -40,7 +40,7 @@ use crate::{
 use siphasher::sip::SipHasher13;
 use slotmap::{SlotMap, SparseSecondaryMap};
 use std::{
-    borrow::{Borrow, BorrowMut},
+    borrow::BorrowMut,
     cell::RefCell,
     collections::{HashMap, VecDeque},
     convert::TryInto,
@@ -1496,10 +1496,7 @@ impl WorkflowMachines {
     }
 
     fn machine(&self, m: MachineKey) -> &Machines {
-        self.all_machines
-            .get(m)
-            .expect("Machine must exist")
-            .borrow()
+        self.all_machines.get(m).expect("Machine must exist")
     }
 
     fn machine_mut(&mut self, m: MachineKey) -> &mut Machines {

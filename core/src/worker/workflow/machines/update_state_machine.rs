@@ -1,5 +1,6 @@
 use super::{workflow_machines::MachineResponse, EventInfo, WFMachinesAdapter, WFMachinesError};
 use crate::{
+    log_to_file::log_to_file,
     protosext::protocol_messages::UpdateRequest,
     worker::workflow::machines::{Cancellable, HistEventData, NewMachineWithResponse},
 };
@@ -121,12 +122,27 @@ impl UpdateMachine {
                 )))
             }
             Some(update_response::Response::Accepted(_)) => {
+                log_to_file(
+                    "update_response::Accepted\n",
+                    "worker:sdk-core:fsm",
+                    "green",
+                );
                 self.on_event(UpdateMachineEvents::Accept)
             }
             Some(update_response::Response::Rejected(f)) => {
+                log_to_file(
+                    "update_response::Rejected\n",
+                    "worker:sdk-core:fsm",
+                    "green",
+                );
                 self.on_event(UpdateMachineEvents::Reject(f))
             }
             Some(update_response::Response::Completed(p)) => {
+                log_to_file(
+                    "update_response::Completed\n",
+                    "worker:sdk-core:fsm",
+                    "green",
+                );
                 self.on_event(UpdateMachineEvents::Complete(p))
             }
         }

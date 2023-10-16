@@ -15,6 +15,7 @@ mod abstractions;
 #[cfg(feature = "ephemeral-server")]
 pub mod ephemeral_server;
 mod internal_flags;
+mod log_to_file;
 mod pollers;
 mod protosext;
 pub mod replay;

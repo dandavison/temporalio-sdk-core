@@ -236,7 +236,6 @@ impl WFMachinesAdapter for UpdateMachine {
                 format!("{}/accept", self.shared_state.message_id),
                 UpdateMsg::Accept(Acceptance {
                     accepted_request_message_id: self.shared_state.message_id.clone(),
-                    accepted_request_sequencing_event_id: self.shared_state.event_seq_id,
                     ..Default::default()
                 }),
             )?,

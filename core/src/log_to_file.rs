@@ -15,7 +15,7 @@ pub fn log_to_file(msg: &str, prefix: &str, color: &str) {
         "green" => msg.green(),
         "blue" => msg.blue(),
         "yellow" => msg.yellow(),
-        _ => msg.yellow(),
+        _ => msg.blue(),
     };
 
     if let Err(e) = writeln!(file, "{}", msg) {

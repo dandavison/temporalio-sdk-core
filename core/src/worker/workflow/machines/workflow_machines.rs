@@ -15,6 +15,7 @@ use super::{
 use crate::{
     abstractions::dbg_panic,
     internal_flags::InternalFlags,
+    log_to_file::log_to_file,
     protosext::{
         protocol_messages::{IncomingProtocolMessage, IncomingProtocolMessageBody},
         CompleteLocalActivityData, HistoryEventExt, ValidScheduleLA,
@@ -600,6 +601,7 @@ impl WorkflowMachines {
         let mut do_handle_event = true;
         let mut history = events.into_iter().peekable();
         while let Some(event) = history.next() {
+            log_to_file(&format!("WFT event\n{}", format_event(&event)), "core", "");
             let eid = event.event_id;
             if eid != self.last_processed_event + 1 {
                 return Err(WFMachinesError::Fatal(format!(
@@ -660,6 +662,11 @@ impl WorkflowMachines {
                                 .try_into()?,
                         ),
                     });
+                    log_to_file(
+                        &format!("added message: {:?}", self.protocol_msgs),
+                        "core",
+                        "",
+                    )
                 }
             }
 
@@ -1490,6 +1497,11 @@ impl WorkflowMachines {
     }
 
     fn get_machine_by_msg(&self, protocol_instance_id: &str) -> Result<MachineKey> {
+        log_to_file(
+            &format!("protocol_instance_id: {protocol_instance_id}"),
+            "sdk-core:get_machine_by_msg",
+            "",
+        );
         Ok(*self
             .machines_by_protocol_instance_id
             .get(protocol_instance_id)
@@ -1536,6 +1548,11 @@ impl WorkflowMachines {
     }
 
     fn add_new_protocol_machine(&mut self, machine: Machines, instance_id: String) -> MachineKey {
+        log_to_file(
+            &format!("protocol_instance_id: {instance_id}"),
+            "add_new_protocol_machine",
+            "",
+        );
         let k = self.all_machines.insert(machine);
         self.machines_by_protocol_instance_id.insert(instance_id, k);
         k
@@ -1701,4 +1718,8 @@ enum CommandIdKind {
     CoreInternal,
     /// A command which is fire-and-forget (ex: Upsert search attribs)
     NeverResolves,
+}
+
+fn format_event(e: &HistoryEvent) -> String {
+    format!("event {}: {}", e.event_id, e.event_type().as_str_name())
 }

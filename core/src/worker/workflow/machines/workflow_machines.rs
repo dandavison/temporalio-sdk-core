@@ -15,6 +15,7 @@ use super::{
 use crate::{
     abstractions::dbg_panic,
     internal_flags::InternalFlags,
+    log_to_file::log_to_file,
     protosext::{
         protocol_messages::{IncomingProtocolMessage, IncomingProtocolMessageBody},
         CompleteLocalActivityData, HistoryEventExt, ValidScheduleLA,
@@ -1447,6 +1448,11 @@ impl WorkflowMachines {
     }
 
     fn get_machine_by_msg(&self, protocol_instance_id: &str) -> Result<MachineKey> {
+        log_to_file(
+            &format!("protocol_instance_id: {protocol_instance_id}"),
+            "sdk-core:get_machine_by_msg",
+            "blue",
+        );
         Ok(*self
             .machines_by_protocol_instance_id
             .get(protocol_instance_id)
@@ -1490,6 +1496,11 @@ impl WorkflowMachines {
     }
 
     fn add_new_protocol_machine(&mut self, machine: Machines, instance_id: String) -> MachineKey {
+        log_to_file(
+            &format!("protocol_instance_id: {instance_id}"),
+            "add_new_protocol_machine",
+            "blue",
+        );
         let k = self.all_machines.insert(machine);
         self.machines_by_protocol_instance_id.insert(instance_id, k);
         k

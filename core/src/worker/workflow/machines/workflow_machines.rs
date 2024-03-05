@@ -666,10 +666,10 @@ impl WorkflowMachines {
         let mut delayed_actions = vec![];
         // Scan through to the next WFT, searching for any patch / la markers, so that we can
         // pre-resolve them.
-        for e in self
+        let (events, has_final_event) = self
             .last_history_from_server
-            .peek_next_wft_sequence(last_handled_wft_started_id)
-        {
+            .peek_next_wft_sequence(last_handled_wft_started_id);
+        for e in events {
             if let Some((patch_id, _)) = e.get_patch_marker_details() {
                 self.encountered_patch_markers.insert(
                     patch_id.clone(),
@@ -720,6 +720,36 @@ impl WorkflowMachines {
                             .try_into()?,
                     ),
                 }));
+            } else if has_final_event {
+                if let Some(
+                    history_event::Attributes::WorkflowExecutionUpdateRequestedEventAttributes(
+                        ref atts,
+                    ),
+                ) = e.attributes
+                {
+                    let id = "todo-message-id".to_string();
+                    let protocol_instance_id =
+                        atts.request.clone().unwrap().meta.unwrap().update_id; // TODO: unwrap()s, double clone
+                    let sequencing_id = Some(SequencingId::EventId(e.event_id));
+
+                    // When we see a workflow update requested event, initialize the machine for it by creating the message
+                    // that is sent for a non-durable update request.
+                    delayed_actions.push(DelayedAction::ProtocolMessage(IncomingProtocolMessage {
+                        id,
+                        protocol_instance_id,
+                        sequencing_id,
+                        body: IncomingProtocolMessageBody::UpdateRequest(
+                            atts.request
+                                .clone()
+                                .ok_or_else(|| {
+                                    WFMachinesError::Fatal(
+                                        "Update requested event must contain request".to_string(),
+                                    )
+                                })?
+                                .try_into()?,
+                        ),
+                    }));
+                }
             }
         }
         for action in delayed_actions {

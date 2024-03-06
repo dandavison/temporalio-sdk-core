@@ -629,6 +629,40 @@ impl WorkflowMachines {
                 self.replaying = false;
             }
 
+            if !self.replaying {
+                if let Some(
+                    history_event::Attributes::WorkflowExecutionUpdateRequestedEventAttributes(
+                        ref atts,
+                    ),
+                ) = event.attributes
+                {
+                    let update_id = atts.request.clone().unwrap().meta.unwrap().update_id; // TODO: unwrap()s, double clone
+                    let id = format!("{}/request", uuid::Uuid::new_v4().simple()); // https://github.com/temporalio/temporal/blob/main/service/history/workflow/update/update.go#L395
+                    let protocol_instance_id = update_id;
+                    let sequencing_id = Some(SequencingId::EventId(
+                        self.last_history_from_server.wft_started_id - 1, // https://github.com/temporalio/temporal/blob/main/service/history/workflow/update/registry.go#L273
+                    ));
+
+                    // When we see a workflow update requested event, initialize the machine for it by creating the message
+                    // that is sent for a non-durable update request.
+                    self.protocol_msgs.push(IncomingProtocolMessage {
+                        id,
+                        protocol_instance_id,
+                        sequencing_id,
+                        body: IncomingProtocolMessageBody::UpdateRequest(
+                            atts.request
+                                .clone()
+                                .ok_or_else(|| {
+                                    WFMachinesError::Fatal(
+                                        "Update requested event must contain request".to_string(),
+                                    )
+                                })?
+                                .try_into()?,
+                        ),
+                    });
+                }
+            }
+
             // Process any messages that should be processed before the event we're about to handle
             let processable_msgs = get_processable_messages(self, eid - 1);
             for msg in processable_msgs {

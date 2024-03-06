@@ -629,21 +629,18 @@ impl HistoryUpdate {
     /// [take_next_wft_sequence]. Will always return the first available WFT sequence if that has
     /// not been called first. May also return an empty iterator or incomplete sequence if we are at
     /// the end of history.
-    pub fn peek_next_wft_sequence(&self, from_wft_started_id: i64) -> (&[HistoryEvent], bool) {
+    pub fn peek_next_wft_sequence(&self, from_wft_started_id: i64) -> &[HistoryEvent] {
         let ix_first_relevant = self
             .starting_index_after_skipping(from_wft_started_id)
             .unwrap_or_default();
         let relevant_events = &self.events[ix_first_relevant..];
         if relevant_events.is_empty() {
-            return (relevant_events, true);
+            return relevant_events;
         }
-        let next_wft_ix =
-            find_end_index_of_next_wft_seq(relevant_events, from_wft_started_id, self.has_last_wft);
-        let ix_end = next_wft_ix.index();
-        (
-            &relevant_events[0..=ix_end],
-            matches!(next_wft_ix, NextWFTSeqEndIndex::Incomplete(_)),
-        )
+        let ix_end =
+            find_end_index_of_next_wft_seq(relevant_events, from_wft_started_id, self.has_last_wft)
+                .index();
+        &relevant_events[0..=ix_end]
     }
 
     /// Returns true if this update has the next needed WFT sequence, false if events will need to
@@ -829,7 +826,7 @@ pub mod tests {
     }
 
     fn next_check_peek(update: &mut HistoryUpdate, from_id: i64) -> Vec<HistoryEvent> {
-        let seq_peeked = update.peek_next_wft_sequence(from_id).0.to_vec();
+        let seq_peeked = update.peek_next_wft_sequence(from_id).to_vec();
         let seq = update.take_next_wft_sequence(from_id).unwrap_events();
         assert_eq!(seq, seq_peeked);
         seq
@@ -842,7 +839,7 @@ pub mod tests {
         let seq_1 = next_check_peek(&mut update, 0);
         assert_eq!(seq_1.len(), 3);
         assert_eq!(seq_1.last().unwrap().event_id, 3);
-        let seq_2_peeked = update.peek_next_wft_sequence(0).0.to_vec();
+        let seq_2_peeked = update.peek_next_wft_sequence(0).to_vec();
         let seq_2 = next_check_peek(&mut update, 3);
         assert_eq!(seq_2, seq_2_peeked);
         assert_eq!(seq_2.len(), 5);

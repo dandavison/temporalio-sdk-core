@@ -42,7 +42,7 @@ use siphasher::sip::SipHasher13;
 use slotmap::{SlotMap, SparseSecondaryMap};
 use std::{
     cell::RefCell,
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     convert::TryInto,
     hash::{Hash, Hasher},
     iter::Peekable,
@@ -705,6 +705,7 @@ impl WorkflowMachines {
             ProtocolMessage(IncomingProtocolMessage),
         }
         let mut delayed_actions = vec![];
+        let mut update_requested_ids = HashSet::<String>::new();
         // Scan through to the next WFT, searching for any patch / la markers, so that we can
         // pre-resolve them.
         for e in self
@@ -741,21 +742,52 @@ impl WorkflowMachines {
                 history_event::Attributes::WorkflowExecutionUpdateAcceptedEventAttributes(ref atts),
             ) = e.attributes
             {
-                // If we see a workflow update accepted event, initialize the machine for it by
-                // pretending we received the message we would've under not-replay.
+                let protocol_instance_id = atts.protocol_instance_id.clone();
+                if !update_requested_ids.contains(&protocol_instance_id) {
+                    // If we see a workflow update accepted event, initialize the machine for it by
+                    // pretending we received the message we would've under not-replay.
+                    delayed_actions.push(DelayedAction::ProtocolMessage(IncomingProtocolMessage {
+                        id: atts.accepted_request_message_id.clone(),
+                        protocol_instance_id,
+                        sequencing_id: Some(SequencingId::EventId(
+                            atts.accepted_request_sequencing_event_id,
+                        )),
+                        body: IncomingProtocolMessageBody::UpdateRequest(
+                            atts.accepted_request
+                                .clone()
+                                .ok_or_else(|| {
+                                    WFMachinesError::Fatal(
+                                        "Update accepted event must contain accepted request"
+                                            .to_string(),
+                                    )
+                                })?
+                                .try_into()?,
+                        ),
+                    }))
+                };
+            } else if let Some(
+                history_event::Attributes::WorkflowExecutionUpdateRequestedEventAttributes(
+                    ref atts,
+                ),
+            ) = e.attributes
+            {
+                let id = "todo-message-id".to_string();
+                let protocol_instance_id = atts.request.clone().unwrap().meta.unwrap().update_id; // TODO: unwrap()s, double clone
+                let sequencing_id = Some(SequencingId::EventId(e.event_id));
+
+                // When we see a workflow update requested event, initialize the machine for it by creating the message
+                // that is sent for a non-durable update request.
+                update_requested_ids.insert(protocol_instance_id.clone());
                 delayed_actions.push(DelayedAction::ProtocolMessage(IncomingProtocolMessage {
-                    id: atts.accepted_request_message_id.clone(),
-                    protocol_instance_id: atts.protocol_instance_id.clone(),
-                    sequencing_id: Some(SequencingId::EventId(
-                        atts.accepted_request_sequencing_event_id,
-                    )),
+                    id,
+                    protocol_instance_id,
+                    sequencing_id,
                     body: IncomingProtocolMessageBody::UpdateRequest(
-                        atts.accepted_request
+                        atts.request
                             .clone()
                             .ok_or_else(|| {
                                 WFMachinesError::Fatal(
-                                    "Update accepted event must contain accepted request"
-                                        .to_string(),
+                                    "Update requested event must contain request".to_string(),
                                 )
                             })?
                             .try_into()?,

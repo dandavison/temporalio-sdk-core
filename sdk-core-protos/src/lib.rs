@@ -1962,10 +1962,10 @@ pub mod temporal {
                             Attributes::SignalExternalWorkflowExecutionFailedEventAttributes(_) => {EventType::SignalExternalWorkflowExecutionFailed}
                             Attributes::ExternalWorkflowExecutionSignaledEventAttributes(_) => {EventType::ExternalWorkflowExecutionSignaled}
                             Attributes::UpsertWorkflowSearchAttributesEventAttributes(_) => {EventType::UpsertWorkflowSearchAttributes}
+                            Attributes::WorkflowExecutionUpdateAdmittedEventAttributes(_) => {EventType::WorkflowExecutionUpdateAdmitted}
                             Attributes::WorkflowExecutionUpdateRejectedEventAttributes(_) => {EventType::WorkflowExecutionUpdateRejected}
                             Attributes::WorkflowExecutionUpdateAcceptedEventAttributes(_) => {EventType::WorkflowExecutionUpdateAccepted}
                             Attributes::WorkflowExecutionUpdateCompletedEventAttributes(_) => {EventType::WorkflowExecutionUpdateCompleted}
-                            Attributes::WorkflowExecutionUpdateRequestedEventAttributes(_) => {EventType::WorkflowExecutionUpdateRequested}
                             Attributes::WorkflowPropertiesModifiedExternallyEventAttributes(_) => {EventType::WorkflowPropertiesModifiedExternally}
                             Attributes::ActivityPropertiesModifiedExternallyEventAttributes(_) => {EventType::ActivityPropertiesModifiedExternally}
                             Attributes::WorkflowPropertiesModifiedEventAttributes(_) => {EventType::WorkflowPropertiesModified}

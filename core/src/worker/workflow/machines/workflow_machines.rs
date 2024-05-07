@@ -597,7 +597,7 @@ impl WorkflowMachines {
             }
         }
 
-        let mut update_requested_messages = HashMap::<String, IncomingProtocolMessage>::new();
+        let mut update_admitted_event_messages = HashMap::<String, IncomingProtocolMessage>::new();
         let mut do_handle_event = true;
         let mut history = events.into_iter().peekable();
         while let Some(event) = history.next() {
@@ -632,16 +632,16 @@ impl WorkflowMachines {
 
             if matches!(
                 event.attributes,
-                Some(history_event::Attributes::WorkflowExecutionUpdateRequestedEventAttributes(_)),
+                Some(history_event::Attributes::WorkflowExecutionUpdateAdmittedEventAttributes(_)),
             ) {
-                // The server has sent a durable update requested event: create the message that would have been sent
-                // for a non-durable update request.
+                // The server has sent a durable update admitted event: create the message that would have been sent
+                // for a non-durable update request message.
                 let msg = IncomingProtocolMessage::try_from(&event).context(
-                    "Failed to create protocol message from WorkflowExecutionUpdateRequestedEvent",
+                    "Failed to create protocol message from WorkflowExecutionUpdateAdmittedEvent",
                 )?;
                 if self.replaying {
                     // Stash the message for use if the update request is accepted.
-                    update_requested_messages.insert(msg.protocol_instance_id.clone(), msg);
+                    update_admitted_event_messages.insert(msg.protocol_instance_id.clone(), msg);
                 } else {
                     // Use the message now.
                     self.protocol_msgs.push(msg);
@@ -721,9 +721,9 @@ impl WorkflowMachines {
             {
                 // We've encountered an UpdateAccepted event during replay: pretend that we received the message we
                 // would have when receiving an update request under not-replay. If this event was preceded by an
-                // UpdateRequested event, then use the message that we created when we encountered that.
+                // UpdateAdmitted event, then use the message that we created when we encountered that.
                 delayed_actions.push(DelayedAction::ProtocolMessage(
-                    update_requested_messages
+                    update_admitted_event_messages
                         .remove(&atts.protocol_instance_id)
                         .map_or_else(|| e.try_into().context(
                             "Failed to create protocol message from WorkflowExecutionUpdateAcceptedEvent",
@@ -791,7 +791,7 @@ impl WorkflowMachines {
             };
         }
         if event.event_type() == EventType::Unspecified
-            || event.event_type() == EventType::WorkflowExecutionUpdateRequested
+            || event.event_type() == EventType::WorkflowExecutionUpdateAdmitted
             || event.attributes.is_none()
         {
             return if !event.worker_may_ignore {

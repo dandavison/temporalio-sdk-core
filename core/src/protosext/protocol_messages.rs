@@ -45,11 +45,11 @@ impl TryFrom<&HistoryEvent> for IncomingProtocolMessage {
 
     fn try_from(event: &HistoryEvent) -> Result<Self, Self::Error> {
         match event.attributes {
-            Some(history_event::Attributes::WorkflowExecutionUpdateRequestedEventAttributes(
+            Some(history_event::Attributes::WorkflowExecutionUpdateAdmittedEventAttributes(
                 ref atts,
             )) => {
                 let request = atts.request.as_ref().ok_or_else(|| {
-                    anyhow!("Update requested event must contain request".to_string())
+                    anyhow!("Update admitted event must contain request".to_string())
                 })?;
                 let protocol_instance_id = request
                     .meta
@@ -62,7 +62,7 @@ impl TryFrom<&HistoryEvent> for IncomingProtocolMessage {
                 Ok(IncomingProtocolMessage {
                     id: format!("{protocol_instance_id}/request"),
                     protocol_instance_id,
-                    // For an UpdateRequested history event (i.e. a "durable update request"), the sequencing event ID is
+                    // For an UpdateAdmitted history event (i.e. a "durable update request"), the sequencing event ID is
                     // the event ID itself.
                     sequencing_id: Some(SequencingId::EventId(event.event_id)),
                     body: IncomingProtocolMessageBody::UpdateRequest(request.clone().try_into()?),

@@ -2063,6 +2063,11 @@ pub mod temporal {
                 tonic::include_proto!("temporal.api.workflow.v1");
             }
         }
+        pub mod nexus {
+            pub mod v1 {
+                tonic::include_proto!("temporal.api.nexus.v1");
+            }
+        }
         pub mod workflowservice {
             pub mod v1 {
                 use std::{

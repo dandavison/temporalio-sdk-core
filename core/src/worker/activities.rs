@@ -688,6 +688,7 @@ fn worker_shutdown_failure() -> Failure {
                 r#type: "WorkerShutdown".to_string(),
                 non_retryable: false,
                 details: None,
+                next_retry_delay: None,
             },
         )),
     }

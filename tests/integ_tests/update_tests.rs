@@ -9,7 +9,6 @@ use std::{
 use temporal_client::WorkflowClientTrait;
 use temporal_sdk::{ActContext, ActivityOptions, LocalActivityOptions, UpdateContext, WfContext};
 use temporal_sdk_core::replay::HistoryForReplay;
-use temporal_sdk_core_api::Worker;
 use temporal_sdk_core_protos::{
     coresdk::{
         activity_result::ActivityExecutionResult,
@@ -715,7 +714,7 @@ async fn task_failure_during_validation() {
             },
             move |_: UpdateContext, _: ()| async move { Ok("done") },
         );
-        ctx.timer(Duration::from_secs(1)).await;
+        ctx.timer(Duration::from_millis(1)).await;
         Ok(().into())
     });
 
@@ -899,6 +898,95 @@ async fn worker_restarted_in_middle_of_update() {
         worker.run_until_done().await.unwrap();
     };
     join!(update, run, stopper);
+    starter
+        .fetch_history_and_replay(wf_id, run_id, worker.inner_mut())
+        .await
+        .unwrap();
+}
+
+//, P0cd8, Pb7ef, Pb63c,
+// Integration tests for verifying pre-admitted functionality and new behavior, including resets and workflow execution
+#[tokio::test]
+async fn test_pre_admitted_and_new_behavior() {
+    let wf_name = "test_pre_admitted_and_new_behavior";
+    let mut starter = CoreWfStarter::new(wf_name);
+    let mut worker = starter.worker().await;
+    let client = starter.get_client().await;
+
+    worker.register_wf(wf_name.to_owned(), |ctx: WfContext| async move {
+        // Simulate pre-admitted update behavior
+        ctx.update_handler(
+            "pre_admitted_update",
+            |_: &_, _: ()| Ok(()),
+            move |ctx: UpdateContext, _: ()| async move {
+                ctx.wf_ctx.timer(Duration::from_secs(1)).await;
+                Ok("pre_admitted_done")
+            },
+        );
+
+        // Simulate new behavior with reset and workflow execution
+        ctx.update_handler(
+            "new_behavior_update",
+            |_: &_, _: ()| Ok(()),
+            move |ctx: UpdateContext, _: ()| async move {
+                ctx.wf_ctx.reset_workflow_execution().await?;
+                ctx.wf_ctx.timer(Duration::from_secs(1)).await;
+                Ok("new_behavior_done")
+            },
+        );
+
+        // Wait for a signal to complete the workflow
+        let mut sig = ctx.make_signal_channel("complete");
+        sig.next().await;
+        Ok(().into())
+    });
+
+    let run_id = starter.start_with_worker(wf_name, &mut worker).await;
+    let wf_id = starter.get_task_queue().to_string();
+
+    // Trigger pre-admitted update
+    client
+        .update_workflow_execution(
+            wf_id.clone(),
+            run_id.clone(),
+            "pre_admitted_update".to_string(),
+            WaitPolicy {
+                lifecycle_stage: UpdateWorkflowExecutionLifecycleStage::Completed as i32,
+            },
+            [().as_json_payload().unwrap()].into_payloads(),
+        )
+        .await
+        .unwrap();
+
+    // Trigger new behavior update
+    client
+        .update_workflow_execution(
+            wf_id.clone(),
+            run_id.clone(),
+            "new_behavior_update".to_string(),
+            WaitPolicy {
+                lifecycle_stage: UpdateWorkflowExecutionLifecycleStage::Completed as i32,
+            },
+            [().as_json_payload().unwrap()].into_payloads(),
+        )
+        .await
+        .unwrap();
+
+    // Complete the workflow
+    client
+        .signal_workflow_execution(
+            wf_id.clone(),
+            run_id.clone(),
+            "complete".to_string(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    worker.run_until_done().await.unwrap();
+
+    // Replay test to ensure behavior is consistent during replay
     starter
         .fetch_history_and_replay(wf_id, run_id, worker.inner_mut())
         .await

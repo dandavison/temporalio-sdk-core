@@ -132,6 +132,37 @@ async fn reapplied_updates_due_to_reset() {
         client.as_ref(),
     )
     .await;
+
+    // Make sure replay works
+    let history = client
+        .get_workflow_execution_history(workflow_id.to_string(), Some(post_reset_run_id), vec![])
+        .await
+        .unwrap()
+        .history
+        .unwrap();
+    let with_id = HistoryForReplay::new(history, workflow_id.to_string());
+    let replay_worker = init_core_replay_preloaded(&workflow_id, [with_id]);
+    _handle_update(
+        FailUpdate::No,
+        CompleteWorkflow::Yes,
+        replay_worker.as_ref(),
+    )
+    .await;
+    _handle_update(FailUpdate::No, CompleteWorkflow::No, replay_worker.as_ref()).await;
+    _handle_update(
+        FailUpdate::No,
+        CompleteWorkflow::Yes,
+        replay_worker.as_ref(),
+    )
+    .await;
+
+    print_history(workflow_id.to_string(), None, client.as_ref()).await;
+    print_history(
+        workflow_id.to_string(),
+        Some(reset_response.run_id.clone()),
+        client.as_ref(),
+    )
+    .await;
 }
 
 // Start a workflow, send an update, accept the update, complete the update, complete the workflow.

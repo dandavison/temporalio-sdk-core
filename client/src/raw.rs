@@ -442,6 +442,7 @@ macro_rules! proxy {
                 let mut c = c.$client_meth().clone();
                 async move { c.$method(req).await }.boxed()
             };
+            dbg!("🟠 sdk-core proxy:", &as_req);
             self.call(stringify!($method), fact, as_req)
         }
     };

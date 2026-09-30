@@ -359,10 +359,17 @@ impl WorkflowMachines {
             }) => {
                 let act_id = CommandID::LocalActivity(seq);
                 let mk = self.get_machine_key(act_id)?;
+                let activation_index = self.local_activity_data.current_activation_index();
                 let mach = self.machine_mut(mk);
                 if let Machines::LocalActivityMachine(ref mut lam) = *mach {
-                    let resps =
-                        lam.try_resolve(result, runtime, attempt, backoff, original_schedule_time)?;
+                    let resps = lam.try_resolve(
+                        result,
+                        runtime,
+                        attempt,
+                        backoff,
+                        original_schedule_time,
+                        activation_index,
+                    )?;
                     if resps.is_empty() {
                         result_important = false;
                     }
@@ -444,6 +451,10 @@ impl WorkflowMachines {
                 Some(workflow_activation_job::Variant::QueryWorkflow(_))
             )
         });
+        // Query-only activations are never recorded in history, so replay can't count them.
+        if !all_query {
+            self.local_activity_data.activation_dispatched();
+        }
         let is_replaying = self.replaying || all_query;
         let deployment_version_for_current_task = if is_replaying {
             self.current_wft_deployment_info.clone()
@@ -535,7 +546,8 @@ impl WorkflowMachines {
     pub(crate) fn iterate_machines(&mut self) -> Result<()> {
         let results = self.drive_me.fetch_workflow_iteration_output();
         self.handle_driven_results(results)?;
-        self.apply_local_activity_peeked_resolutions()?;
+        self.apply_local_activity_peeked_resolutions(false)?;
+        self.release_held_local_activity_resolutions_if_idle()?;
         self.prepare_commands()?;
         if self.workflow_is_finished()
             && let Some(rt) = self.total_runtime()
@@ -583,6 +595,9 @@ impl WorkflowMachines {
             }
         };
         let num_events_to_process = events.len();
+        if num_events_to_process > 0 {
+            self.local_activity_data.wft_applied();
+        }
 
         // Process any WFT completed events in the next sequence, as well as peek ahead to the
         // subsequent one to properly apply flags & any other data. Macro used to avoid self
@@ -815,7 +830,7 @@ impl WorkflowMachines {
                         .unwrap_or(true);
                     if should_queue {
                         self.local_activity_data.insert_peeked_marker(*la_dat);
-                        self.apply_local_activity_peeked_resolutions()?;
+                        self.apply_local_activity_peeked_resolutions(false)?;
                     }
                 }
                 DelayedAction::ProtocolMessage(pm) => {
@@ -823,6 +838,7 @@ impl WorkflowMachines {
                 }
             }
         }
+        self.release_held_local_activity_resolutions_if_idle()?;
 
         // Only record replay latency if we actually did replay work. This avoids recording
         // near-zero latencies for the first workflow task (which has no history to replay) or
@@ -1223,6 +1239,11 @@ impl WorkflowMachines {
                     self.local_activity_data.enqueue(act);
                 }
                 MachineResponse::RequestCancelLocalActivity(seq) => {
+                    // A resolution recorded for a later activation must wait for it, even when lang
+                    // cancels the activity during an earlier one.
+                    if self.local_activity_data.has_held_preresolution(seq) {
+                        continue;
+                    }
                     // We might already know about the status from a pre-resolution. Apply it if so.
                     // We need to do this because otherwise we might need to perform additional
                     // activations during replay that didn't happen during execution, just like
@@ -1242,6 +1263,7 @@ impl WorkflowMachines {
                         self.local_activity_data.remove_from_queue(seq)
                     {
                         // We removed it. Notify the machine that the activity cancelled.
+                        let activation_index = self.local_activity_data.current_activation_index();
                         if let Machines::LocalActivityMachine(lam) = self.machine_mut(smk) {
                             let more_responses = lam.try_resolve(
                                 LocalActivityExecutionResult::empty_cancel(),
@@ -1249,6 +1271,7 @@ impl WorkflowMachines {
                                 removed_act.attempt,
                                 None,
                                 removed_act.original_schedule_time,
+                                activation_index,
                             )?;
                             self.process_machine_responses(smk, more_responses)?;
                         } else {
@@ -1393,11 +1416,13 @@ impl WorkflowMachines {
                     );
                 }
                 WFCommandVariant::RequestCancelLocalActivity(attrs) => {
+                    let activation_index = self.local_activity_data.current_activation_index();
                     cancel_machine!(
                         self,
                         CommandID::LocalActivity(attrs.seq),
                         LocalActivityMachine,
-                        cancel
+                        cancel,
+                        activation_index
                     );
                 }
                 WFCommandVariant::CompleteWorkflow(attrs) => {
@@ -1679,11 +1704,26 @@ impl WorkflowMachines {
         }
     }
 
+    /// Held resolutions wait for a later activation, but with no pending jobs there won't be one.
+    /// That only happens if replay produced different activations than the original execution,
+    /// in which case the resolutions are delivered the way ungrouped markers are, rather than
+    /// never.
+    fn release_held_local_activity_resolutions_if_idle(&mut self) -> Result<()> {
+        if !self.has_pending_jobs() {
+            self.apply_local_activity_peeked_resolutions(true)?;
+        }
+        Ok(())
+    }
+
     /// Applies peeked local activity resolutions until the next marker belongs to an activity the
-    /// workflow has not scheduled yet. Preserving marker order makes replay reproduce the same
-    /// activation grouping that occurred when the history was written.
-    fn apply_local_activity_peeked_resolutions(&mut self) -> Result<()> {
-        while let Some(seq) = self.local_activity_data.peek_preresolution_seq() {
+    /// workflow has not scheduled yet, or, unless `include_held` is set, was recorded for a later
+    /// activation in this WFT. Older markers lack grouping information and retain the historical
+    /// batching behavior.
+    fn apply_local_activity_peeked_resolutions(&mut self, include_held: bool) -> Result<()> {
+        while let Some(seq) = self
+            .local_activity_data
+            .peek_preresolution_seq(include_held)
+        {
             let Ok(mk) = self.get_machine_key(CommandID::LocalActivity(seq)) else {
                 break;
             };

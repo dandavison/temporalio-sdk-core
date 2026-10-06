@@ -1,9 +1,12 @@
-//! Drives the local-server wasm module (built from the wasmpoc/ tree of the temporal branch
-//! dandavison/temporalio-temporal:local-workflow-progress) through one workflow (an activity and a timer) and reports
-//! per-call latency and peak RSS.
-use anyhow::{Result, bail};
+//! Drives the local-server wasm module through one workflow (an activity and a timer), playing the
+//! worker with hand-built requests, and reports per-call latency and peak RSS.
+use anyhow::Result;
+use local_server_host::Guest;
 use prost::Message;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    path::Path,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 use temporalio_protos::temporal::api::{
     command::v1::{
         Command, CompleteWorkflowExecutionCommandAttributes, ScheduleActivityTaskCommandAttributes,
@@ -14,89 +17,26 @@ use temporalio_protos::temporal::api::{
     taskqueue::v1::TaskQueue,
     workflowservice::v1::*,
 };
-use wasmtime::{Engine, Instance, Linker, Module, Store, TypedFunc};
-use wasmtime_wasi::{WasiCtxBuilder, p1::WasiP1Ctx};
 
-struct Guest {
-    store: Store<WasiP1Ctx>,
-    memory: wasmtime::Memory,
-    alloc: TypedFunc<u32, u32>,
-    free: TypedFunc<u32, ()>,
-    call: TypedFunc<(u32, u32, u32, u32), u64>,
-    advance_time: TypedFunc<i64, u64>,
+struct Host {
+    guest: Guest,
     calls: Vec<(String, Duration)>,
 }
 
-impl Guest {
-    fn new(path: &str, now_nanos: i64) -> Result<Self> {
-        let engine = Engine::default();
-        let module = unsafe { Module::deserialize_file(&engine, path)? };
-        let mut linker: Linker<WasiP1Ctx> = Linker::new(&engine);
-        wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |cx| cx)?;
-        let mut store = Store::new(&engine, WasiCtxBuilder::new().inherit_stdio().build_p1());
-        let instance: Instance = linker.instantiate(&mut store, &module)?;
-        instance
-            .get_typed_func::<(), ()>(&mut store, "_initialize")?
-            .call(&mut store, ())?;
-        let init = instance.get_typed_func::<i64, u32>(&mut store, "temporal_init")?;
-        if init.call(&mut store, now_nanos)? != 0 {
-            bail!("temporal_init failed");
-        }
-        Ok(Self {
-            memory: instance.get_memory(&mut store, "memory").unwrap(),
-            alloc: instance.get_typed_func(&mut store, "temporal_alloc")?,
-            free: instance.get_typed_func(&mut store, "temporal_free")?,
-            call: instance.get_typed_func(&mut store, "temporal_call")?,
-            advance_time: instance.get_typed_func(&mut store, "temporal_advance_time")?,
-            store,
-            calls: vec![],
-        })
-    }
-
-    fn write(&mut self, bytes: &[u8]) -> Result<u32> {
-        let ptr = self.alloc.call(&mut self.store, bytes.len() as u32)?;
-        self.memory.write(&mut self.store, ptr as usize, bytes)?;
-        Ok(ptr)
-    }
-
-    fn read_response(&mut self, packed: u64) -> Result<Vec<u8>> {
-        let (ptr, len) = ((packed >> 32) as u32, (packed & 0xffff_ffff) as usize);
-        let mut out = vec![0u8; len];
-        self.memory.read(&self.store, ptr as usize, &mut out)?;
-        self.free.call(&mut self.store, ptr)?;
-        if out[0] != 0 {
-            bail!("status {}: {}", out[0], String::from_utf8_lossy(&out[1..]));
-        }
-        Ok(out[1..].to_vec())
-    }
-
+impl Host {
     fn rpc<Req: Message, Resp: Message + Default>(
         &mut self,
         method: &str,
         request: &Req,
     ) -> Result<Resp> {
         let start = Instant::now();
-        let method_ptr = self.write(method.as_bytes())?;
-        let request_ptr = self.write(&request.encode_to_vec())?;
-        let packed = self.call.call(
-            &mut self.store,
-            (
-                method_ptr,
-                method.len() as u32,
-                request_ptr,
-                request.encoded_len() as u32,
-            ),
-        )?;
-        self.free.call(&mut self.store, method_ptr)?;
-        self.free.call(&mut self.store, request_ptr)?;
-        let response = Resp::decode(self.read_response(packed)?.as_slice())?;
+        let response = self.guest.call(method, &request.encode_to_vec())??;
         self.calls.push((method.to_string(), start.elapsed()));
-        Ok(response)
+        Ok(Resp::decode(response.as_slice())?)
     }
 
     fn advance_time(&mut self, now_nanos: i64) -> Result<()> {
-        let packed = self.advance_time.call(&mut self.store, now_nanos)?;
-        self.read_response(packed).map(|_| ())
+        self.guest.advance_time(now_nanos).map(|_| ())
     }
 }
 
@@ -117,7 +57,7 @@ fn task_queue() -> Option<TaskQueue> {
     })
 }
 
-fn poll_wft(g: &mut Guest) -> Result<PollWorkflowTaskQueueResponse> {
+fn poll_wft(g: &mut Host) -> Result<PollWorkflowTaskQueueResponse> {
     g.rpc(
         "PollWorkflowTaskQueue",
         &PollWorkflowTaskQueueRequest {
@@ -129,7 +69,7 @@ fn poll_wft(g: &mut Guest) -> Result<PollWorkflowTaskQueueResponse> {
     )
 }
 
-fn complete_wft(g: &mut Guest, token: Vec<u8>, commands: Vec<Command>) -> Result<()> {
+fn complete_wft(g: &mut Host, token: Vec<u8>, commands: Vec<Command>) -> Result<()> {
     g.rpc::<_, RespondWorkflowTaskCompletedResponse>(
         "RespondWorkflowTaskCompleted",
         &RespondWorkflowTaskCompletedRequest {
@@ -155,7 +95,10 @@ fn main() -> Result<()> {
         .expect("usage: local-server-host <module.wasm|module.cwasm>");
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as i64;
     let load = Instant::now();
-    let mut g = Guest::new(&path, now)?;
+    let mut g = Host {
+        guest: Guest::new(Path::new(&path), now)?,
+        calls: vec![],
+    };
     println!("load+init: {:?}", load.elapsed());
 
     let started: StartWorkflowExecutionResponse = g.rpc(

@@ -1,0 +1,3 @@
+[toolchain]
+# wasmtime 48 needs rustc 1.95; sdk-core pins an older toolchain.
+channel = "stable"

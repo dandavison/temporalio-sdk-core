@@ -5,12 +5,16 @@
 //! The module never blocks and has no clock. The host gives it the time before every call, and
 //! implements long polls: a poll that finds nothing waits until another call changes the module's
 //! state, until the next task deadline the module reports, or until the poll's gRPC timeout.
+//!
+//! The module runs on its own thread because wasmtime-wasi's synchronous API panics when called
+//! from within a tokio runtime.
 use anyhow::{Result, bail};
 use futures_util::FutureExt;
 use prost::Message;
 use std::{
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{Arc, mpsc},
+    thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use temporalio_client::callback_based::{
@@ -20,7 +24,10 @@ use temporalio_protos::temporal::api::workflowservice::v1::{
     GetWorkflowExecutionHistoryRequest, GetWorkflowExecutionHistoryResponse,
     PollActivityTaskQueueResponse, PollWorkflowTaskQueueResponse,
 };
-use tokio::{sync::watch, time::Instant};
+use tokio::{
+    sync::{oneshot, watch},
+    time::Instant,
+};
 use tonic::{Code, Status};
 use wasmtime::{Engine, Instance, Linker, Module, Store, TypedFunc};
 use wasmtime_wasi::{WasiCtxBuilder, p1::WasiP1Ctx};
@@ -40,15 +47,31 @@ pub fn grpc_service(path: &Path) -> Result<CallbackBasedGrpcService> {
 }
 
 pub struct LocalServer {
-    guest: Mutex<Guest>,
+    calls: mpsc::Sender<Call>,
     /// Incremented whenever a call may have made a task available.
     changes: watch::Sender<u64>,
 }
 
+/// A call of a gRPC method of the module, made at the current time, whose reply carries the
+/// response and the next task deadline.
+struct Call {
+    rpc: String,
+    request: Vec<u8>,
+    reply: oneshot::Sender<CallResult>,
+}
+
+/// A response and the time (Unix nanoseconds) at which the next task is due.
+type CallResult = Result<(Vec<u8>, Option<i64>), Status>;
+
 impl LocalServer {
     pub fn load(path: &Path) -> Result<Self> {
+        let (calls, receiver) = mpsc::channel();
+        let (loaded, load_result) = mpsc::channel();
+        let path = path.to_owned();
+        thread::spawn(move || serve_calls(&path, &loaded, &receiver));
+        load_result.recv()??;
         Ok(Self {
-            guest: Mutex::new(Guest::new(path, now_nanos())?),
+            calls,
             changes: watch::Sender::new(0),
         })
     }
@@ -57,7 +80,7 @@ impl LocalServer {
         let proto = if is_long_poll(&request) {
             self.long_poll(&request).await?
         } else {
-            let (response, _) = self.call(&request.rpc, &request.proto)?;
+            let (response, _) = self.call(&request.rpc, &request.proto).await?;
             self.changes.send_modify(|n| *n += 1);
             response
         };
@@ -72,7 +95,7 @@ impl LocalServer {
         let mut changes = self.changes.subscribe();
         loop {
             changes.mark_unchanged();
-            let (response, next_deadline) = self.call(&request.rpc, &request.proto)?;
+            let (response, next_deadline) = self.call(&request.rpc, &request.proto).await?;
             if !is_empty_long_poll_response(&request.rpc, &response)? {
                 self.changes.send_modify(|n| *n += 1);
                 return Ok(response);
@@ -92,13 +115,48 @@ impl LocalServer {
     }
 
     /// Calls the module at the current time and returns the response and the next task deadline.
-    fn call(&self, rpc: &str, request: &[u8]) -> Result<(Vec<u8>, Option<Instant>), Status> {
-        let mut guest = self.guest.lock().unwrap();
-        guest.advance_time(now_nanos()).map_err(internal)?;
-        let response = guest.call(rpc, request).map_err(internal)??;
-        let next_deadline = guest.advance_time(now_nanos()).map_err(internal)?;
+    async fn call(&self, rpc: &str, request: &[u8]) -> Result<(Vec<u8>, Option<Instant>), Status> {
+        let (reply, response) = oneshot::channel();
+        self.calls
+            .send(Call {
+                rpc: rpc.to_owned(),
+                request: request.to_vec(),
+                reply,
+            })
+            .map_err(|_| Status::unavailable("local server stopped"))?;
+        let (response, next_deadline) = response
+            .await
+            .map_err(|_| Status::unavailable("local server stopped"))??;
         Ok((response, next_deadline.map(instant_at)))
     }
+}
+
+/// Runs the module, serving calls until the `LocalServer` is dropped.
+fn serve_calls(path: &Path, loaded: &mpsc::Sender<Result<()>>, calls: &mpsc::Receiver<Call>) {
+    let mut guest = match Guest::new(path, now_nanos()) {
+        Ok(guest) => guest,
+        Err(e) => {
+            let _ = loaded.send(Err(e));
+            return;
+        }
+    };
+    let _ = loaded.send(Ok(()));
+    for call in calls {
+        let _ = call
+            .reply
+            .send(call_now(&mut guest, &call.rpc, &call.request));
+    }
+}
+
+fn call_now(
+    guest: &mut Guest,
+    rpc: &str,
+    request: &[u8],
+) -> Result<(Vec<u8>, Option<i64>), Status> {
+    guest.advance_time(now_nanos()).map_err(internal)?;
+    let response = guest.call(rpc, request).map_err(internal)??;
+    let next_deadline = guest.advance_time(now_nanos()).map_err(internal)?;
+    Ok((response, next_deadline))
 }
 
 fn is_long_poll(request: &GrpcRequest) -> bool {

@@ -1,6 +1,9 @@
-//! Hosts the local-server wasm module (built from the wasmpoc/ tree of the temporal branch
-//! dandavison/temporalio-temporal:local-workflow-progress) as a gRPC service for sdk-core's
+//! Hosts the local-server wasm module (built from `cmd/chasmwasm` of the temporal branch
+//! dandavison/temporalio-temporal:chasm-standalone-build-libs) as a gRPC service for sdk-core's
 //! `ConnectionOptions::service_override`.
+//!
+//! Given an [`Upstream`] server, the host also runs, on the local server, workflow runs that the
+//! upstream server owns (see [`bridge`]).
 //!
 //! The module never blocks and has no clock. The host gives it the time before every call, and
 //! implements long polls: a poll that finds nothing waits until another call changes the module's
@@ -8,7 +11,12 @@
 //!
 //! The module runs on its own thread because wasmtime-wasi's synchronous API panics when called
 //! from within a tokio runtime.
+mod bridge;
+
+pub use bridge::Upstream;
+
 use anyhow::{Result, bail};
+use bridge::Bridge;
 use futures_util::FutureExt;
 use prost::Message;
 use std::{
@@ -35,9 +43,10 @@ use wasmtime_wasi::{WasiCtxBuilder, p1::WasiP1Ctx};
 /// Used when a long poll carries no `grpc-timeout`.
 const DEFAULT_LONG_POLL_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Returns a gRPC service that serves every call from the module at `path` (a `.cwasm`).
-pub fn grpc_service(path: &Path) -> Result<CallbackBasedGrpcService> {
-    let server = Arc::new(LocalServer::load(path)?);
+/// Returns a gRPC service that serves every call from the module at `path` (a `.cwasm`), and runs
+/// there workflow runs that the upstream server owns, if any.
+pub fn grpc_service(path: &Path, upstream: Option<Upstream>) -> Result<CallbackBasedGrpcService> {
+    let server = LocalServer::load(path, upstream)?;
     Ok(CallbackBasedGrpcService {
         callback: Arc::new(move |request| {
             let server = server.clone();
@@ -50,6 +59,7 @@ pub struct LocalServer {
     calls: mpsc::Sender<Call>,
     /// Incremented whenever a call may have made a task available.
     changes: watch::Sender<u64>,
+    bridge: Option<Arc<Bridge>>,
 }
 
 /// A call of a gRPC method of the module, made at the current time, whose reply carries the
@@ -64,24 +74,30 @@ struct Call {
 type CallResult = Result<(Vec<u8>, Option<i64>), Status>;
 
 impl LocalServer {
-    pub fn load(path: &Path) -> Result<Self> {
+    pub fn load(path: &Path, upstream: Option<Upstream>) -> Result<Arc<Self>> {
         let (calls, receiver) = mpsc::channel();
         let (loaded, load_result) = mpsc::channel();
         let path = path.to_owned();
         thread::spawn(move || serve_calls(&path, &loaded, &receiver));
         load_result.recv()??;
-        Ok(Self {
+        Ok(Arc::new(Self {
             calls,
             changes: watch::Sender::new(0),
-        })
+            bridge: upstream.map(|upstream| Arc::new(Bridge::new(upstream))),
+        }))
     }
 
-    async fn serve(&self, request: GrpcRequest) -> Result<GrpcSuccessResponse, Status> {
+    async fn serve(self: &Arc<Self>, request: GrpcRequest) -> Result<GrpcSuccessResponse, Status> {
+        if let Some(bridge) = &self.bridge
+            && request.rpc == "PollWorkflowTaskQueue"
+        {
+            bridge.observe_poll(self, &request.proto);
+        }
         let proto = if is_long_poll(&request) {
             self.long_poll(&request).await?
         } else {
             let (response, _) = self.call(&request.rpc, &request.proto).await?;
-            self.changes.send_modify(|n| *n += 1);
+            self.notify_change();
             response
         };
         Ok(GrpcSuccessResponse {
@@ -97,7 +113,7 @@ impl LocalServer {
             changes.mark_unchanged();
             let (response, next_deadline) = self.call(&request.rpc, &request.proto).await?;
             if !is_empty_long_poll_response(&request.rpc, &response)? {
-                self.changes.send_modify(|n| *n += 1);
+                self.notify_change();
                 return Ok(response);
             }
             let wake = next_deadline.map_or(timeout, |d| d.min(timeout));
@@ -108,10 +124,14 @@ impl LocalServer {
                         return Ok(response);
                     }
                     // A task fell due; the next call runs it, which may unblock other polls.
-                    self.changes.send_modify(|n| *n += 1);
+                    self.notify_change();
                 }
             }
         }
+    }
+
+    fn notify_change(&self) {
+        self.changes.send_modify(|n| *n += 1);
     }
 
     /// Calls the module at the current time and returns the response and the next task deadline.
@@ -217,7 +237,7 @@ fn instant_at(unix_nanos: i64) -> Instant {
     Instant::now() + from_now
 }
 
-fn internal(e: anyhow::Error) -> Status {
+pub(crate) fn internal(e: anyhow::Error) -> Status {
     Status::internal(e.to_string())
 }
 

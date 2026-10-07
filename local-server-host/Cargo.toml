@@ -12,11 +12,12 @@ tls-ring = ["temporalio-client/tls-ring"]
 
 [dependencies]
 anyhow = "1"
+bytes = "1"
 futures-util = "0.3"
 prost = "0.14"
 temporalio-client = { path = "../crates/client", default-features = false }
-tokio = { version = "1.47", features = ["sync", "time", "macros"] }
-tonic = { version = "0.14.6", default-features = false }
+tokio = { version = "1.47", features = ["sync", "time", "macros", "rt"] }
+tonic = { version = "0.14.6", default-features = false, features = ["channel"] }
 prost-types = { version = "0.7", package = "prost-wkt-types" }
 wasmtime = { version = "48", default-features = false, features = ["runtime", "std", "anyhow"] }
 wasmtime-wasi = "48"

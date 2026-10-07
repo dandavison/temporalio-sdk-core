@@ -92,7 +92,7 @@ fn rss_mb() -> f64 {
 fn main() -> Result<()> {
     let path = std::env::args()
         .nth(1)
-        .expect("usage: local-server-host <module.wasm|module.cwasm>");
+        .expect("usage: local-server-host <module.wasm>");
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as i64;
     let load = Instant::now();
     let mut g = Host {

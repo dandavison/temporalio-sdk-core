@@ -43,11 +43,9 @@ use wasmtime_wasi::{WasiCtxBuilder, p1::WasiP1Ctx};
 /// Used when a long poll carries no `grpc-timeout`.
 const DEFAULT_LONG_POLL_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Returns a gRPC service that serves every call from the module at `path`, and runs there workflow
-/// runs that the upstream server owns, if any. A `.cwasm` module must have been compiled by the
-/// same wasmtime version, for the configuration of this host's default engine. Any other file is
-/// compiled as wasm when it is loaded, and the compiled code is cached in wasmtime's default cache
-/// directory.
+/// Returns a gRPC service that serves every call from the wasm module at `path`, and runs there
+/// workflow runs that the upstream server owns, if any. The module is compiled when it is loaded,
+/// and the compiled code is cached in wasmtime's default cache directory.
 pub fn grpc_service(path: &Path, upstream: Option<Upstream>) -> Result<CallbackBasedGrpcService> {
     let server = LocalServer::load(path, upstream)?;
     Ok(CallbackBasedGrpcService {
@@ -256,17 +254,10 @@ pub struct Guest {
 
 impl Guest {
     pub fn new(path: &Path, now_nanos: i64) -> Result<Self> {
-        let (engine, module) = if path.extension().is_some_and(|e| e == "cwasm") {
-            let engine = Engine::default();
-            let module = unsafe { Module::deserialize_file(&engine, path)? };
-            (engine, module)
-        } else {
-            let mut config = Config::new();
-            config.cache(Some(Cache::from_file(None)?));
-            let engine = Engine::new(&config)?;
-            let module = Module::from_file(&engine, path)?;
-            (engine, module)
-        };
+        let mut config = Config::new();
+        config.cache(Some(Cache::from_file(None)?));
+        let engine = Engine::new(&config)?;
+        let module = Module::from_file(&engine, path)?;
         let mut linker: Linker<WasiP1Ctx> = Linker::new(&engine);
         wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |cx| cx)?;
         let mut store = Store::new(&engine, WasiCtxBuilder::new().inherit_stdio().build_p1());

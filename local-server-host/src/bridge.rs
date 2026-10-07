@@ -15,7 +15,7 @@
 //!   lease expired, and that progress is discarded.
 //! - Queries sent to an owned run fail. The protocol's relay of signals, updates, cancellation and
 //!   queries to the owner is not implemented by the server.
-//! - The connection to the server is plaintext, with no API key.
+//! - The connection to the server is plaintext: there is no TLS.
 use crate::{LocalServer, internal};
 use prost::Message;
 use std::{
@@ -54,6 +54,10 @@ pub struct Upstream {
     pub target_url: String,
     /// How often the host sends the server a run's new history. The lease lasts three intervals.
     pub sync_interval: Duration,
+    /// Sent as `authorization: Bearer <api_key>` with every request.
+    pub api_key: Option<String>,
+    /// gRPC metadata sent with every request.
+    pub headers: Vec<(String, String)>,
 }
 
 pub(crate) struct Bridge {
@@ -89,7 +93,7 @@ impl Bridge {
     pub(crate) fn new(upstream: Upstream) -> Self {
         Self {
             upstream,
-            server_id: format!("local-server-host-{}", std::process::id()),
+            server_id: format!("local-server@{}", std::process::id()),
             channel: OnceLock::new(),
             task_queues: Mutex::default(),
             leases: Mutex::default(),
@@ -404,6 +408,24 @@ impl Bridge {
             .map_err(|e| Status::unavailable(e.to_string()))?;
         let mut request = tonic::Request::new(body);
         request.set_timeout(timeout);
+        let metadata = request.metadata_mut();
+        for (key, value) in &self.upstream.headers {
+            metadata.insert(
+                key.parse::<tonic::metadata::MetadataKey<_>>()
+                    .map_err(|_| Status::invalid_argument(format!("invalid header {key}")))?,
+                value.parse().map_err(|_| {
+                    Status::invalid_argument(format!("invalid value for header {key}"))
+                })?,
+            );
+        }
+        if let Some(api_key) = &self.upstream.api_key {
+            metadata.insert(
+                "authorization",
+                format!("Bearer {api_key}")
+                    .parse()
+                    .map_err(|_| Status::invalid_argument("invalid API key"))?,
+            );
+        }
         let path = path
             .parse()
             .map_err(|_| Status::internal(format!("invalid path {path}")))?;

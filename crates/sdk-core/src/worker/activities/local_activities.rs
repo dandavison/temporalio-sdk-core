@@ -561,7 +561,7 @@ impl LocalActivityManager {
                     is_local: true,
                     run_id: String::new(),
                     attempt_stamp: 0,
-                    workflow_task: None,
+                    workflow_task: new_la.workflow_task,
                 })),
             }));
         }

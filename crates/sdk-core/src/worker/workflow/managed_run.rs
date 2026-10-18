@@ -784,7 +784,13 @@ impl ManagedRun {
             if !completion.activation_was_eviction && !self.am_broken {
                 self.wfm.apply_next_task_if_ready()?;
             }
-            let new_local_acts = self.wfm.drain_queued_local_activities();
+            let mut new_local_acts = self.wfm.drain_queued_local_activities();
+            let workflow_task = self.workflow_task_identity();
+            for req in &mut new_local_acts {
+                if let LocalActRequest::New(la) = req {
+                    la.workflow_task = workflow_task;
+                }
+            }
             self.sink_la_requests(new_local_acts)?;
 
             if self.wfm.machines.outstanding_local_activity_count() == 0 {
@@ -1129,10 +1135,14 @@ impl ManagedRun {
     }
 
     fn set_workflow_task_identity(&self, activation: &mut WorkflowActivation) {
-        activation.workflow_task = self.wft.as_ref().map(|wft| WorkflowTaskIdentity {
+        activation.workflow_task = self.workflow_task_identity();
+    }
+
+    fn workflow_task_identity(&self) -> Option<WorkflowTaskIdentity> {
+        self.wft.as_ref().map(|wft| WorkflowTaskIdentity {
             previous_started_event_id: wft.info.previous_started_event_id,
             attempt: wft.info.attempt,
-        });
+        })
     }
 
     fn insert_outstanding_activation(&mut self, act: &ActivationOrAuto) {

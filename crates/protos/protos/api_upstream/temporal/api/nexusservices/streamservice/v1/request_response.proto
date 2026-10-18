@@ -39,6 +39,20 @@ message WorkflowTaskProducer {
     int32 attempt = 3;
 }
 
+// A local activity attempt. It runs inside a workflow task of its run, which may complete before the
+// local activity does. The server cannot verify it, because Core, not the server, makes its task
+// token.
+message LocalActivityProducer {
+    string run_id = 1;
+    // The workflow task the local activity started in: the started event ID of the run's last
+    // completed workflow task at that time, and that task's attempt.
+    int64 previous_started_event_id = 2;
+    int32 workflow_task_attempt = 3;
+    string activity_id = 4;
+    // The local activity's attempt.
+    int32 attempt = 5;
+}
+
 // A client appending under an identity and epoch that it chooses.
 message ClientProducer {
     string id = 1;
@@ -52,16 +66,24 @@ message Producer {
         // the attempt stamp, from it.
         bytes activity_task_token = 2;
         WorkflowTaskProducer workflow_task = 3;
+        LocalActivityProducer local_activity = 4;
     }
 }
 
-// The (producer, epoch, seq) stored with every record. `workflow_task` is set only for a workflow
-// producer, and is part of its epoch.
+// The (producer, epoch, seq) stored with every record. A producer's epoch is (workflow_task,
+// workflow_task_attempt, epoch), compared in that order.
+//
+// The workflow fields are set only for workflow and local activity producers: the run, the workflow
+// task the record was appended in (the started event ID of the run's last completed workflow task),
+// and that task's attempt. A reader keeps such a record if the task's commit record names the same
+// attempt, and discards it if the commit record names another.
 message ProducerIdentity {
     string producer = 1;
     int64 workflow_task = 2;
     int64 epoch = 3;
     int64 seq = 4;
+    string workflow_run_id = 5;
+    int32 workflow_task_attempt = 6;
 }
 
 message AppendRecord {
@@ -69,9 +91,10 @@ message AppendRecord {
     temporal.api.common.v1.Payload payload = 2;
 }
 
-// Records which attempt of a workflow task committed.
+// Records which attempt completed a workflow task. The server writes one for every workflow task of
+// a run whose workflow has a stream.
 message WorkflowTaskCommit {
-    string producer = 1;
+    string workflow_run_id = 1;
     int64 workflow_task = 2;
     int64 attempt = 3;
 }
@@ -171,4 +194,9 @@ enum StreamFailureType {
     // The producer's epoch is lower than one already seen, or is not the current attempt.
     STREAM_FAILURE_TYPE_EPOCH_FENCED = 8;
     STREAM_FAILURE_TYPE_SPECULATIVE_WORKFLOW_TASK = 9;
+    // The seq skips one: a new epoch must start at 0, and an epoch's next seq must follow its
+    // latest.
+    STREAM_FAILURE_TYPE_SEQ_GAP = 10;
+    // A record, or the append as a whole, exceeds a size limit.
+    STREAM_FAILURE_TYPE_TOO_LARGE = 11;
 }

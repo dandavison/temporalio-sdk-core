@@ -64,7 +64,7 @@ message ProducerIdentity {
     int64 seq = 4;
 }
 
-message RecordInput {
+message AppendRecord {
     string topic = 1;
     temporal.api.common.v1.Payload payload = 2;
 }
@@ -101,7 +101,7 @@ message AppendRequest {
     StreamRef stream = 1;
     Producer producer = 2;
     int64 seq = 3;
-    repeated RecordInput records = 4;
+    repeated AppendRecord records = 4;
     // Records that the producer will write no more. It does not close the stream.
     bool finish = 5;
 }
@@ -114,7 +114,9 @@ message AppendResponse {
 message ReadRequest {
     StreamRef stream = 1;
     // Reads the records after this cursor. Empty means from the beginning.
-    bytes cursor = 2;
+    // (-- api-linter: core::0140::prepositions=disabled
+    //     aip.dev/not-precedent: a read starts AFTER(cursor), the boundary after the last record the reader has seen. --)
+    bytes after = 2;
     // Empty means all topics.
     repeated string topics = 3;
     int32 max_records = 4;
@@ -163,9 +165,9 @@ enum StreamFailureType {
     // The cursor belongs to another stream.
     STREAM_FAILURE_TYPE_CURSOR_MISMATCH = 5;
     // The seq is already stored with different content.
-    STREAM_FAILURE_TYPE_SEQ_CONFLICT = 6;
-    // The seq is lower than the producer's latest.
-    STREAM_FAILURE_TYPE_SEQ_SUPERSEDED = 7;
+    STREAM_FAILURE_TYPE_SEQ_DIVERGENT = 6;
+    // The seq is lower than the producer's latest: a stale sequence.
+    STREAM_FAILURE_TYPE_SEQ_STALE = 7;
     // The producer's epoch is lower than one already seen, or is not the current attempt.
     STREAM_FAILURE_TYPE_EPOCH_FENCED = 8;
     STREAM_FAILURE_TYPE_SPECULATIVE_WORKFLOW_TASK = 9;

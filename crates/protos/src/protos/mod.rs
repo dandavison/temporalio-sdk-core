@@ -354,7 +354,7 @@ pub mod coresdk {
                             priority: r.priority,
                             is_local: false,
                             run_id: r.activity_run_id,
-                            attempt_stamp: 0,
+                            attempt_stamp: r.attempt_stamp,
                         },
                     )),
                 }

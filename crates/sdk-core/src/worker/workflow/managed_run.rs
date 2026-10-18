@@ -33,7 +33,7 @@ use temporalio_common::protos::{
     coresdk::{
         common::ExternalStorageMetrics,
         workflow_activation::{
-            WorkflowActivation, create_evict_activation, query_to_job,
+            WorkflowActivation, WorkflowTaskIdentity, create_evict_activation, query_to_job,
             remove_from_cache::EvictionReason, workflow_activation_job,
         },
         workflow_commands::{FailWorkflowExecution, QueryResult},
@@ -194,6 +194,7 @@ impl ManagedRun {
         let is_incremental = work.is_incremental();
         let wft_info = WorkflowTaskInfo {
             attempt: work.attempt,
+            previous_started_event_id: work.update.previous_wft_started_id,
             task_token: work.task_token,
             wf_id: work.execution.workflow_id.clone(),
         };
@@ -1036,13 +1037,15 @@ impl ManagedRun {
                     }
                 }
                 let r = match maybe_act {
-                    Some(ActivationOrAuto::LangActivation(activation)) => {
+                    Some(ActivationOrAuto::LangActivation(mut activation)) => {
                         if activation.jobs.is_empty() {
                             dbg_panic!("Should not send lang activation with no jobs");
                         }
+                        self.set_workflow_task_identity(&mut activation);
                         Some(ActivationOrAuto::LangActivation(activation))
                     }
                     Some(ActivationOrAuto::ReadyForQueries(mut act)) => {
+                        self.set_workflow_task_identity(&mut act);
                         if let Some(wft) = self.wft.as_mut() {
                             put_queries_in_act(&mut act, wft);
                             Some(ActivationOrAuto::LangActivation(act))
@@ -1123,6 +1126,13 @@ impl ManagedRun {
                 }
             }
         }
+    }
+
+    fn set_workflow_task_identity(&self, activation: &mut WorkflowActivation) {
+        activation.workflow_task = self.wft.as_ref().map(|wft| WorkflowTaskIdentity {
+            previous_started_event_id: wft.info.previous_started_event_id,
+            attempt: wft.info.attempt,
+        });
     }
 
     fn insert_outstanding_activation(&mut self, act: &ActivationOrAuto) {

@@ -355,6 +355,7 @@ pub mod coresdk {
                             is_local: false,
                             run_id: r.activity_run_id,
                             attempt_stamp: r.attempt_stamp,
+                            workflow_task: None,
                         },
                     )),
                 }

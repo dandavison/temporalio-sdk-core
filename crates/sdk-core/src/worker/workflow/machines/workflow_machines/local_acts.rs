@@ -64,6 +64,7 @@ impl LocalActivityData {
                         workflow_id: wf_id.to_string(),
                         run_id: run_id.to_string(),
                     },
+                    workflow_task: None,
                 })
             }))
             .collect()

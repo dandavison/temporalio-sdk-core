@@ -429,13 +429,15 @@ impl WFStream {
         if res.is_none()
             && let Some(rh) = self.runs.get_mut(run_id)
         {
+            let completed_workflow = rh.workflow_is_finished()
+                && matches!(report.wft_report_status, WFTReportStatus::Reported { .. });
+            if completed_workflow {
+                rh.report_cache_full_eviction_as_execution_ending();
+            }
             // Attempt to produce the next activation if needed
             res = rh.check_more_activations();
             // If there's no more work and we reported workflow completion to server, evict.
-            if res.is_none()
-                && rh.workflow_is_finished()
-                && matches!(report.wft_report_status, WFTReportStatus::Reported { .. })
-            {
+            if res.is_none() && completed_workflow {
                 res = rh
                     .request_eviction(RequestEvictMsg {
                         run_id: run_id.to_string(),

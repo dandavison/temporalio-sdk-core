@@ -16,17 +16,22 @@ import "temporal/api/failure/v1/message.proto";
 // (--
 // Prototype. Operations of the "temporal.api.nexusservices.streamservice.v1.StreamService" service on
 // the System Nexus Endpoint: "Append", "Read" and "Close". They operate on the stream owned by a
-// workflow run chain. A failed operation returns an operation failure whose ApplicationFailureInfo
-// type is the name of a StreamFailureType value.
+// workflow run chain or a Standalone Activity execution. A failed operation returns an operation
+// failure whose ApplicationFailureInfo type is the name of a StreamFailureType value.
 // --)
 
-// A stream owned by a workflow run chain.
+// A stream, named by its owner: a workflow run chain, by workflow_id and first_run_id, or a
+// Standalone Activity execution, by activity_id and activity_run_id. Exactly one of workflow_id and
+// activity_id is set.
 message StreamRef {
     string workflow_id = 1;
     // Pins the run chain. Empty means the workflow ID's current chain.
     string first_run_id = 2;
     // The caller's namespace. The server sets it when empty.
     string namespace = 3;
+    string activity_id = 4;
+    // Pins the activity execution. Empty means the activity ID's current execution.
+    string activity_run_id = 5;
 }
 
 // A workflow task attempt appending sink-style. The server checks it against the run's current
@@ -185,11 +190,15 @@ message ReadResponse {
 
 // Input of the "Close" operation. Only the stream's owner, a workflow task of the owning workflow,
 // may close the stream.
+// Only the stream's owner closes it: for a workflow-owned stream, a workflow task attempt of the
+// run (owner); for an activity-owned stream, the activity's current attempt, by its task token
+// (activity_task_token).
 message CloseRequest {
     StreamRef stream = 1;
     WorkflowTaskProducer owner = 2;
     int64 seq = 3;
     StreamClose close = 4;
+    bytes activity_task_token = 5;
 }
 
 message CloseResponse {

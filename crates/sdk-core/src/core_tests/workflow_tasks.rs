@@ -3286,3 +3286,66 @@ async fn grpc_message_too_large_doesnt_spam_task_fails() {
     core.drain_pollers_and_shutdown().await;
     // Mock only expects 1 task failure, and would fail here if we spammed
 }
+
+#[tokio::test]
+async fn activation_carries_workflow_task_identity() {
+    use temporalio_common::protos::coresdk::workflow_activation::WorkflowTaskIdentity;
+
+    let mut t = TestHistoryBuilder::default();
+    t.add_by_type(EventType::WorkflowExecutionStarted);
+    t.add_full_wf_task();
+    t.add_we_signaled("sig", vec![]);
+    t.add_full_wf_task();
+    t.add_workflow_execution_completed();
+    // The mock numbers the attempts of a repeated response, so the first task's second response
+    // is its attempt 2.
+    let mut mh = MockPollCfg::from_resp_batches(
+        "fake_wf_id",
+        t,
+        [
+            ResponseType::ToTaskNum(1),
+            ResponseType::ToTaskNum(1),
+            ResponseType::OneTask(2),
+        ],
+        mock_worker_client(),
+    );
+    mh.num_expected_fails = 1;
+    let mut mock = build_mock_pollers(mh);
+    mock.worker_cfg(|cfg| cfg.max_cached_workflows = 1);
+    let worker = mock_worker(mock);
+    let identity = |previous_started_event_id, attempt| {
+        Some(WorkflowTaskIdentity {
+            previous_started_event_id,
+            attempt,
+        })
+    };
+
+    let activation = worker.poll_workflow_activation().await.unwrap();
+    assert_eq!(activation.workflow_task, identity(0, 1));
+    worker
+        .complete_workflow_activation(WorkflowActivationCompletion::fail(
+            activation.run_id,
+            Failure {
+                message: "Simulated workflow task failure".to_string(),
+                ..Default::default()
+            },
+            None,
+        ))
+        .await
+        .unwrap();
+    let eviction = worker.poll_workflow_activation().await.unwrap();
+    assert!(eviction.is_only_eviction());
+    worker
+        .complete_workflow_activation(WorkflowActivationCompletion::empty(eviction.run_id))
+        .await
+        .unwrap();
+
+    let activation = worker.poll_workflow_activation().await.unwrap();
+    assert_eq!(activation.workflow_task, identity(0, 2));
+    worker
+        .complete_workflow_activation(WorkflowActivationCompletion::empty(activation.run_id))
+        .await
+        .unwrap();
+    let activation = worker.poll_workflow_activation().await.unwrap();
+    assert_eq!(activation.workflow_task, identity(3, 1));
+}

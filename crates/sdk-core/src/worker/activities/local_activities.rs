@@ -557,6 +557,7 @@ impl LocalActivityManager {
                     priority: Some(Default::default()),
                     is_local: true,
                     run_id: String::new(),
+                    attempt_stamp: 0,
                 })),
             }));
         }

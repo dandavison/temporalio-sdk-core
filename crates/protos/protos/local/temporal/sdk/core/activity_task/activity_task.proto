@@ -65,6 +65,9 @@ message Start {
     bool is_local = 17;
     // Run ID of this activity execution. Only set for standalone activities.
     string run_id = 19;
+    // Identifies this attempt among all attempts of the activity. Unlike `attempt`, it never goes
+    // back, so it tells a superseded attempt from the current one. Zero for local activities.
+    int32 attempt_stamp = 20;
 }
 
 // Attempt to cancel a running activity

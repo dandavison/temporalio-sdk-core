@@ -354,6 +354,7 @@ pub mod coresdk {
                             priority: r.priority,
                             is_local: false,
                             run_id: r.activity_run_id,
+                            attempt_stamp: 0,
                         },
                     )),
                 }
@@ -1130,6 +1131,7 @@ pub mod coresdk {
                     last_sdk_version: String::new(),
                     suggest_continue_as_new_reasons: vec![],
                     target_worker_deployment_version_changed: false,
+                    workflow_task: None,
                 }
             }
 

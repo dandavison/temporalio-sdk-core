@@ -611,6 +611,11 @@ message PollActivityTaskQueueResponse {
     //   3. If every group has some pending polls, assign the next poll to a group randomly
     //     according to the weights.
     temporal.api.taskqueue.v1.PollerGroupsInfo poller_groups_info = 22;
+    // Identifies this attempt among all attempts of the activity. It is 0 for the first attempt and
+    // increases each time the server schedules another attempt, including after a reset, which sets
+    // `attempt` back to 1. It never decreases, so a worker can use it to tell a superseded attempt
+    // from the current one.
+    int32 attempt_stamp = 24;
 }
 
 message RecordActivityTaskHeartbeatRequest {

@@ -1998,3 +1998,38 @@ async fn heartbeat_response_can_be_paused() {
 
     core.drain_activity_poller_and_shutdown().await;
 }
+
+#[tokio::test]
+async fn activity_start_carries_attempt_stamp() {
+    use temporalio_common::protos::coresdk::activity_task::Start;
+
+    let mut mock_client = mock_worker_client();
+    mock_client
+        .expect_poll_activity_task()
+        .times(1)
+        .returning(|_, _| {
+            Ok(PollActivityTaskQueueResponse {
+                task_token: vec![1],
+                activity_id: "act1".to_string(),
+                attempt: 1,
+                attempt_stamp: 7,
+                ..Default::default()
+            })
+        });
+    let worker = Worker::new_test(
+        test_worker_cfg()
+            .max_outstanding_activities(1_usize)
+            .build()
+            .unwrap(),
+        mock_client,
+    );
+
+    let task = worker.poll_activity_task().await.unwrap();
+    assert_matches!(
+        task.variant,
+        Some(activity_task::Variant::Start(Start {
+            attempt_stamp: 7,
+            ..
+        }))
+    );
+}

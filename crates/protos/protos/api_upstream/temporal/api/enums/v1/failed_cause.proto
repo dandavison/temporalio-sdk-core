@@ -90,6 +90,9 @@ enum WorkflowTaskFailedCause {
     WORKFLOW_TASK_FAILED_CAUSE_WORKFLOW_PAUSE_REQUESTED_BEFORE_TASK_STARTED = 39;
     // A workflow task failed because the request exceeded a size limit.
     WORKFLOW_TASK_FAILED_CAUSE_REQUEST_TOO_LARGE = 40;
+    // A workflow task completion carried a stream append the server could not apply, such as a
+    // commit-mode append from a run whose workflow appends are in sink mode.
+    WORKFLOW_TASK_FAILED_CAUSE_BAD_STREAM_APPEND = 41;
 }
 
 enum StartChildWorkflowExecutionFailedCause {

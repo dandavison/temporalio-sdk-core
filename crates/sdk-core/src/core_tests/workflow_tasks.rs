@@ -3349,3 +3349,64 @@ async fn activation_carries_workflow_task_identity() {
     let activation = worker.poll_workflow_activation().await.unwrap();
     assert_eq!(activation.workflow_task, identity(3, 1));
 }
+
+/// The eviction that follows a terminal completion the server accepted, with the cache disabled.
+async fn eviction_after_completing_workflow_with_zero_cache(
+    completion_result: Result<(), tonic::Status>,
+) -> EvictionReason {
+    let wfid = "fake_wf_id";
+    let mut t = TestHistoryBuilder::default();
+    t.add_by_type(EventType::WorkflowExecutionStarted);
+    t.add_full_wf_task();
+    let mut mock_cfg = MockPollCfg::from_resp_batches(wfid, t, [1], mock_worker_client());
+    mock_cfg.make_poll_stream_interminable = true;
+    let mut completion_result = Some(completion_result);
+    mock_cfg.completion_mock_fn = Some(Box::new(move |_| {
+        completion_result
+            .take()
+            .unwrap_or(Ok(()))
+            .map(|()| Default::default())
+    }));
+    let mut mock = build_mock_pollers(mock_cfg);
+    mock.worker_cfg(|wc| wc.max_cached_workflows = 0);
+    let core = mock_worker(mock);
+
+    let activation = core.poll_workflow_activation().await.unwrap();
+    core.complete_workflow_activation(WorkflowActivationCompletion::from_cmd(
+        activation.run_id,
+        CompleteWorkflowExecution { result: None }.into(),
+    ))
+    .await
+    .unwrap();
+    let eviction = core.poll_workflow_activation().await.unwrap();
+    let reason = assert_matches!(
+        eviction.jobs.as_slice(),
+        [WorkflowActivationJob {
+            variant: Some(workflow_activation_job::Variant::RemoveFromCache(r)),
+        }] => r.reason()
+    );
+    core.complete_workflow_activation(WorkflowActivationCompletion::empty(eviction.run_id))
+        .await
+        .unwrap();
+    core.drain_pollers_and_shutdown().await;
+    reason
+}
+
+#[tokio::test]
+async fn accepted_terminal_completion_with_zero_cache_evicts_as_execution_ending() {
+    assert_eq!(
+        eviction_after_completing_workflow_with_zero_cache(Ok(())).await,
+        EvictionReason::WorkflowExecutionEnding
+    );
+}
+
+#[tokio::test]
+async fn rejected_terminal_completion_with_zero_cache_evicts_with_rejection_reason() {
+    assert_eq!(
+        eviction_after_completing_workflow_with_zero_cache(Err(tonic::Status::not_found(
+            "Workflow task not found."
+        )))
+        .await,
+        EvictionReason::TaskNotFound
+    );
+}

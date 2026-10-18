@@ -670,6 +670,8 @@ impl ManagedRun {
                             },
                         ))],
                         vec![],
+                        // Lang's protocol messages from earlier activations of this task are still
+                        // queued, and are sent with this completion.
                         vec![],
                         VersioningBehavior::Unspecified, // Doesn't matter since we're failing wf
                         resp_chan,
@@ -966,8 +968,13 @@ impl ManagedRun {
 
     /// Reports an eviction already requested because the cache is full (or disabled) as
     /// [EvictionReason::WorkflowExecutionEnding], once the server has accepted the run's terminal
-    /// completion. A server rejection of the completion requests its own eviction before this is
-    /// called, replacing the cache-full reason.
+    /// completion. With the cache disabled the cache-full eviction is requested before the
+    /// completion is reported, so without this lang would never see that the execution ended.
+    ///
+    /// The caller cannot tell acceptance from rejection: [WFTReportStatus::Reported] is also the
+    /// status of a completion the server rejected. This relies on a rejection having already
+    /// replaced the cache-full reason: the rejection's eviction request is sent before the
+    /// post-activation message, and [Self::request_eviction] keeps the most recent reason.
     pub(super) fn report_cache_full_eviction_as_execution_ending(&mut self) {
         if let Some(info) = self.trying_to_evict.as_mut()
             && info.reason == EvictionReason::CacheFull

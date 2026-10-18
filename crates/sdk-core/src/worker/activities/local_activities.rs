@@ -122,7 +122,8 @@ pub(crate) struct NewLocalAct {
     pub(crate) workflow_type: String,
     pub(crate) workflow_exec_info: WorkflowExecution,
     pub(crate) schedule_time: SystemTime,
-    /// The workflow task the local activity was scheduled in.
+    /// The workflow task the local activity was scheduled in. Retries keep it, also after a workflow
+    /// task heartbeat has started a new task. The run sets it when it sinks the request.
     pub(crate) workflow_task: Option<WorkflowTaskIdentity>,
 }
 

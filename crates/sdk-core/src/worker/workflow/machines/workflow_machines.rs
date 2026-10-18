@@ -500,6 +500,11 @@ impl WorkflowMachines {
 
     /// Queues protocol messages from lang, to be sent as they are in the workflow task completion.
     pub(crate) fn add_lang_protocol_messages(&mut self, messages: Vec<ProtocolMessage>) {
+        // Unlike Core's own messages, these are queued while replaying too. Replay needs nothing
+        // from them: they are not recorded in History, and Core sends no completion while
+        // replaying except to fail the workflow on nondeterminism. So lang must add them only when
+        // not replaying. No ProtocolMessageCommand is added for them, so they have no position
+        // among the task's commands.
         self.message_outbox.extend(messages);
     }
 
@@ -1189,7 +1194,8 @@ impl WorkflowMachines {
                 }
                 MachineResponse::IssueNewMessage(pm) => {
                     // Messages shouldn't be sent back when replaying. This is true for update,
-                    // currently the only user of protocol messages. May eventually change.
+                    // currently the only machine that issues protocol messages. May eventually
+                    // change.
                     if !self.replaying {
                         self.message_outbox.push_back(pm);
                     }

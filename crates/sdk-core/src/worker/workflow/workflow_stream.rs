@@ -293,11 +293,13 @@ impl WFStream {
                 ValidatedCompletion::Success {
                     commands,
                     used_flags,
+                    protocol_messages,
                     versioning_behavior,
                     ..
                 } => match rh.successful_completion(
                     commands,
                     used_flags,
+                    protocol_messages,
                     versioning_behavior,
                     complete.response_tx,
                     false,

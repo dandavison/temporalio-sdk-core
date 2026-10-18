@@ -1379,6 +1379,7 @@ fn validate_completion(
                 run_id: completion.run_id,
                 commands,
                 used_flags: success.used_internal_flags,
+                protocol_messages: success.protocol_messages,
                 versioning_behavior: success.versioning_behavior.try_into().unwrap_or_default(),
             })
         }
@@ -1403,6 +1404,7 @@ enum ValidatedCompletion {
         run_id: String,
         commands: Vec<WFCommand>,
         used_flags: Vec<u32>,
+        protocol_messages: Vec<ProtocolMessage>,
         versioning_behavior: VersioningBehavior,
     },
     Fail {

@@ -498,6 +498,11 @@ impl WorkflowMachines {
             .gather_for_wft_complete()
     }
 
+    /// Queues protocol messages from lang, to be sent as they are in the workflow task completion.
+    pub(crate) fn add_lang_protocol_messages(&mut self, messages: Vec<ProtocolMessage>) {
+        self.message_outbox.extend(messages);
+    }
+
     pub(crate) fn add_lang_used_flags(&self, flags: Vec<u32>) {
         (*self.observed_internal_flags)
             .borrow_mut()

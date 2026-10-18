@@ -11,7 +11,7 @@ use crate::{
             ActivationOrAuto, BufferedTasks, DrivenWorkflow, EvictionRequestResult,
             FailedActivationWFTReport, HeartbeatTimeoutMsg, HistoryUpdate,
             LocalActivityRequestSink, LocalResolution, NextPageReq, OutstandingActivation,
-            OutstandingTask, PermittedWFT, RequestEvictMsg, RunBasics,
+            OutstandingTask, PermittedWFT, ProtocolMessage, RequestEvictMsg, RunBasics,
             ServerCommandsWithWorkflowInfo, TaskStorageMetrics, WFCommand, WFCommandVariant,
             WFMachinesError, WFT_HEARTBEAT_TIMEOUT_FRACTION, WFTReportStatus, WorkflowTaskInfo,
             history_update::HistoryPaginator,
@@ -420,6 +420,7 @@ impl ManagedRun {
         &mut self,
         mut commands: Vec<WFCommand>,
         used_flags: Vec<u32>,
+        protocol_messages: Vec<ProtocolMessage>,
         versioning_behavior: VersioningBehavior,
         resp_chan: Option<oneshot::Sender<ActivationCompleteResult>>,
         is_forced_failure: bool,
@@ -496,6 +497,7 @@ impl ManagedRun {
                 has_pending_query,
                 query_responses,
                 used_flags,
+                protocol_messages,
                 resp_chan,
                 is_forced_failure,
                 versioning_behavior,
@@ -668,6 +670,7 @@ impl ManagedRun {
                             },
                         ))],
                         vec![],
+                        vec![],
                         VersioningBehavior::Unspecified, // Doesn't matter since we're failing wf
                         resp_chan,
                         true,
@@ -761,6 +764,9 @@ impl ManagedRun {
         };
 
         self.wfm.machines.add_lang_used_flags(completion.used_flags);
+        self.wfm
+            .machines
+            .add_lang_protocol_messages(completion.protocol_messages);
 
         // If this is just bookkeeping after a reply to an eviction activation, we can bypass
         // everything, since there is no reason to continue trying to update machines.
@@ -1589,6 +1595,8 @@ struct RunActivationCompletion {
     has_pending_query: bool,
     query_responses: Vec<QueryResult>,
     used_flags: Vec<u32>,
+    /// Sent as they are in the workflow task completion.
+    protocol_messages: Vec<ProtocolMessage>,
     is_forced_failure: bool,
     /// Used to notify the worker when the completion is done processing and the completion can
     /// unblock. Must always be `Some` when initialized.

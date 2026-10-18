@@ -48,7 +48,7 @@ use temporalio_common::{
                 ScheduleActivity, SetPatchMarker, StartChildWorkflowExecution, UpdateResponse,
                 update_response::Response, workflow_command,
             },
-            workflow_completion::WorkflowActivationCompletion,
+            workflow_completion::{WorkflowActivationCompletion, workflow_activation_completion},
         },
         temporal::api::{
             command::v1::command::Attributes,
@@ -59,6 +59,7 @@ use temporalio_common::{
                 TimerFiredEventAttributes, WorkflowPropertiesModifiedExternallyEventAttributes,
                 history_event,
             },
+            protocol::v1::Message as ProtocolMessage,
             workflowservice::v1::{
                 GetWorkflowExecutionHistoryResponse, RespondWorkflowTaskCompletedResponse,
             },
@@ -3409,4 +3410,44 @@ async fn rejected_terminal_completion_with_zero_cache_evicts_with_rejection_reas
         .await,
         EvictionReason::TaskNotFound
     );
+}
+
+#[tokio::test]
+async fn lang_protocol_messages_are_sent_in_workflow_task_completion() {
+    let wfid = "fake_wf_id";
+    let mut t = TestHistoryBuilder::default();
+    t.add_by_type(EventType::WorkflowExecutionStarted);
+    t.add_full_wf_task();
+    let message = ProtocolMessage {
+        id: "stream-append".to_string(),
+        protocol_instance_id: "stream".to_string(),
+        body: Some(prost_types::Any {
+            type_url: "type.googleapis.com/test.Body".to_string(),
+            value: vec![1, 2, 3],
+        }),
+        ..Default::default()
+    };
+    let mut mock_cfg = MockPollCfg::from_resp_batches(wfid, t, [1], mock_worker_client());
+    mock_cfg.make_poll_stream_interminable = true;
+    let expected = message.clone();
+    mock_cfg.completion_mock_fn = Some(Box::new(move |completion| {
+        assert_eq!(completion.messages, vec![expected.clone()]);
+        Ok(Default::default())
+    }));
+    let mut mock = build_mock_pollers(mock_cfg);
+    mock.worker_cfg(|wc| wc.max_cached_workflows = 1);
+    let core = mock_worker(mock);
+
+    let activation = core.poll_workflow_activation().await.unwrap();
+    let mut completion = WorkflowActivationCompletion::from_cmd(
+        activation.run_id,
+        CompleteWorkflowExecution { result: None }.into(),
+    );
+    if let Some(workflow_activation_completion::Status::Successful(success)) =
+        completion.status.as_mut()
+    {
+        success.protocol_messages = vec![message];
+    }
+    core.complete_workflow_activation(completion).await.unwrap();
+    core.drain_pollers_and_shutdown().await;
 }

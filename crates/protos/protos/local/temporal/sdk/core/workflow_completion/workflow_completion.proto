@@ -6,6 +6,7 @@ option ruby_package = "Temporalio::Internal::Bridge::Api::WorkflowCompletion";
 import "temporal/api/failure/v1/message.proto";
 import "temporal/api/enums/v1/failed_cause.proto";
 import "temporal/api/enums/v1/workflow.proto";
+import "temporal/api/protocol/v1/message.proto";
 import "temporal/sdk/core/common/common.proto";
 import "temporal/sdk/core/workflow_commands/workflow_commands.proto";
 
@@ -33,6 +34,10 @@ message Success {
     repeated uint32 used_internal_flags = 6;
     // The versioning behavior this workflow is currently using
     temporal.api.enums.v1.VersioningBehavior versioning_behavior = 7;
+    // Protocol messages that lang sends in the workflow task completion. Core does not interpret
+    // them. Messages from every activation of the workflow task are sent in its completion, and are
+    // dropped if the task fails.
+    repeated temporal.api.protocol.v1.Message protocol_messages = 8;
 }
 
 // Failure to activate or execute a workflow

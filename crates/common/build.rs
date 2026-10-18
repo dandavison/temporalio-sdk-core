@@ -763,6 +763,7 @@ const BLOB_FIELDS: &[&str] = &[
     "temporal.api.workflowservice.v1.SignalWorkflowExecutionRequest.input",
     "temporal.api.workflowservice.v1.StartActivityExecutionRequest.input",
     "temporal.api.workflowservice.v1.StartNexusOperationExecutionRequest.input",
+    "temporal.api.workflowservice.v1.StartNexusOperationRequest.input",
     "temporal.api.workflowservice.v1.StartWorkflowExecutionRequest.input",
 ];
 

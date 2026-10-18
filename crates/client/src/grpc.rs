@@ -1852,6 +1852,24 @@ proxier! {
         }
     );
     (
+        start_nexus_operation,
+        StartNexusOperationRequest,
+        StartNexusOperationResponse,
+        |r| {
+            let labels = namespaced_request!(r);
+            r.extensions_mut().insert(labels);
+        }
+    );
+    (
+        cancel_nexus_operation,
+        CancelNexusOperationRequest,
+        CancelNexusOperationResponse,
+        |r| {
+            let labels = namespaced_request!(r);
+            r.extensions_mut().insert(labels);
+        }
+    );
+    (
         terminate_nexus_operation_execution,
         TerminateNexusOperationExecutionRequest,
         TerminateNexusOperationExecutionResponse,

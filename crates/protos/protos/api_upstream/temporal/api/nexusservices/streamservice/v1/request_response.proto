@@ -1,0 +1,172 @@
+syntax = "proto3";
+
+package temporal.api.nexusservices.streamservice.v1;
+
+option go_package = "go.temporal.io/api/nexusservices/streamservice/v1;streamservice";
+option java_package = "io.temporal.api.nexusservices.streamservice.v1";
+option java_multiple_files = true;
+option java_outer_classname = "RequestResponseProto";
+option ruby_package = "Temporalio::Api::Nexusservices::Streamservice::V1";
+option csharp_namespace = "Temporalio.Api.Nexusservices.Streamservice.V1";
+
+import "google/protobuf/duration.proto";
+import "temporal/api/common/v1/message.proto";
+import "temporal/api/failure/v1/message.proto";
+
+// (--
+// Prototype. Operations of the "temporal.api.nexusservices.streamservice.v1.StreamService" service on
+// the System Nexus Endpoint: "Append", "Read" and "Close". They operate on the stream owned by a
+// workflow run chain. A failed operation returns an operation failure whose ApplicationFailureInfo
+// type is the name of a StreamFailureType value.
+// --)
+
+// A stream owned by a workflow run chain.
+message StreamRef {
+    string workflow_id = 1;
+    // Pins the run chain. Empty means the workflow ID's current chain.
+    string first_run_id = 2;
+    // The caller's namespace. The server sets it when empty.
+    string namespace = 3;
+}
+
+// A workflow task attempt appending sink-style. The server checks it against the run's current
+// workflow task.
+message WorkflowTaskProducer {
+    string run_id = 1;
+    // The started event ID of the run's last completed workflow task.
+    int64 previous_started_event_id = 2;
+    // The attempt of the current workflow task.
+    int32 attempt = 3;
+}
+
+// A client appending under an identity and epoch that it chooses.
+message ClientProducer {
+    string id = 1;
+    int64 epoch = 2;
+}
+
+message Producer {
+    oneof variant {
+        ClientProducer client = 1;
+        // The task token of an activity attempt. The server derives the producer and its epoch,
+        // the attempt stamp, from it.
+        bytes activity_task_token = 2;
+        WorkflowTaskProducer workflow_task = 3;
+    }
+}
+
+// The (producer, epoch, seq) stored with every record. `workflow_task` is set only for a workflow
+// producer, and is part of its epoch.
+message ProducerIdentity {
+    string producer = 1;
+    int64 workflow_task = 2;
+    int64 epoch = 3;
+    int64 seq = 4;
+}
+
+message RecordInput {
+    string topic = 1;
+    temporal.api.common.v1.Payload payload = 2;
+}
+
+// Records which attempt of a workflow task committed.
+message WorkflowTaskCommit {
+    string producer = 1;
+    int64 workflow_task = 2;
+    int64 attempt = 3;
+}
+
+message Record {
+    // Marks the boundary after this record.
+    bytes cursor = 1;
+    ProducerIdentity producer = 2;
+    string topic = 3;
+    temporal.api.common.v1.Payload payload = 4;
+    // The producer will write no more.
+    bool finish = 5;
+    // Set when this record is a commit marker rather than data.
+    WorkflowTaskCommit workflow_task_commit = 6;
+}
+
+message StreamClose {
+    CloseState state = 1;
+    temporal.api.failure.v1.Failure failure = 2;
+    string reason = 3;
+}
+
+// Input of the "Append" operation. Appends the records as one atomic, contiguous batch. The first
+// append creates the stream. A retry of the producer's latest seq with the same content stores
+// nothing and returns the original cursors.
+message AppendRequest {
+    StreamRef stream = 1;
+    Producer producer = 2;
+    int64 seq = 3;
+    repeated RecordInput records = 4;
+    // Records that the producer will write no more. It does not close the stream.
+    bool finish = 5;
+}
+
+message AppendResponse {
+    repeated bytes cursors = 1;
+}
+
+// Input of the "Read" operation.
+message ReadRequest {
+    StreamRef stream = 1;
+    // Reads the records after this cursor. Empty means from the beginning.
+    bytes cursor = 2;
+    // Empty means all topics.
+    repeated string topics = 3;
+    int32 max_records = 4;
+    // How long the read may wait for a matching record. The server caps it.
+    google.protobuf.Duration wait = 5;
+    // If positive, reads the last N matching records instead.
+    int32 last = 6;
+}
+
+message ReadResponse {
+    repeated Record records = 1;
+    // Where the next read resumes, past records a topic filter skipped.
+    bytes cursor = 2;
+    // Set once the stream is closed and the reader has every record.
+    StreamClose close = 3;
+}
+
+// Input of the "Close" operation. Only the stream's owner, a workflow task of the owning workflow,
+// may close the stream.
+message CloseRequest {
+    StreamRef stream = 1;
+    WorkflowTaskProducer owner = 2;
+    int64 seq = 3;
+    StreamClose close = 4;
+}
+
+message CloseResponse {
+}
+
+enum CloseState {
+    CLOSE_STATE_UNSPECIFIED = 0;
+    CLOSE_STATE_COMPLETED = 1;
+    CLOSE_STATE_FAILED = 2;
+    CLOSE_STATE_CANCELED = 3;
+    CLOSE_STATE_TERMINATED = 4;
+    CLOSE_STATE_TIMED_OUT = 5;
+}
+
+// The ApplicationFailureInfo types of failed stream operations.
+enum StreamFailureType {
+    STREAM_FAILURE_TYPE_UNSPECIFIED = 0;
+    STREAM_FAILURE_TYPE_CLOSED = 1;
+    STREAM_FAILURE_TYPE_NOT_FOUND = 2;
+    STREAM_FAILURE_TYPE_EXPIRED = 3;
+    STREAM_FAILURE_TYPE_NOT_OWNER = 4;
+    // The cursor belongs to another stream.
+    STREAM_FAILURE_TYPE_CURSOR_MISMATCH = 5;
+    // The seq is already stored with different content.
+    STREAM_FAILURE_TYPE_SEQ_CONFLICT = 6;
+    // The seq is lower than the producer's latest.
+    STREAM_FAILURE_TYPE_SEQ_SUPERSEDED = 7;
+    // The producer's epoch is lower than one already seen, or is not the current attempt.
+    STREAM_FAILURE_TYPE_EPOCH_FENCED = 8;
+    STREAM_FAILURE_TYPE_SPECULATIVE_WORKFLOW_TASK = 9;
+}

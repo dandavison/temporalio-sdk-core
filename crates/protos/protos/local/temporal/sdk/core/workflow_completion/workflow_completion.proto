@@ -40,6 +40,11 @@ message Success {
     // because of nondeterminism. They are dropped if the task fails. Core queues them also while
     // replaying, so lang must not send them then.
     repeated temporal.api.protocol.v1.Message protocol_messages = 8;
+    // Lang asks Core to complete the workflow task now, with force_create_new_workflow_task, while
+    // the local activities it scheduled keep running; their results arrive in the next task, as
+    // after Core's local activity heartbeat. Ignored when no local activity is outstanding, and
+    // while replaying. Prototype: needs SDK-team approval.
+    bool force_new_workflow_task = 9;
 }
 
 // Failure to activate or execute a workflow

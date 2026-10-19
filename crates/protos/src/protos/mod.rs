@@ -82,6 +82,7 @@ pub mod coresdk {
                     used_internal_flags: vec![],
                     versioning_behavior: VersioningBehavior::Unspecified.into(),
                     protocol_messages: vec![],
+                    force_new_workflow_task: false,
                 }
             }
         }

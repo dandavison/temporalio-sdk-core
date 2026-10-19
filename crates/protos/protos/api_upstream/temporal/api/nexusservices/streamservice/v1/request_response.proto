@@ -10,14 +10,16 @@ option ruby_package = "Temporalio::Api::Nexusservices::Streamservice::V1";
 option csharp_namespace = "Temporalio.Api.Nexusservices.Streamservice.V1";
 
 import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
 import "temporal/api/common/v1/message.proto";
 import "temporal/api/failure/v1/message.proto";
 
 // (--
 // Prototype. Operations of the "temporal.api.nexusservices.streamservice.v1.StreamService" service on
-// the System Nexus Endpoint: "Append", "Read" and "Close". Callers make them as synchronous direct
-// Nexus calls (StartNexusOperation), which the server accepts only when CHASM and
-// frontend.enableDirectNexusCalls are enabled. They operate on the stream owned by a workflow run
+// the System Nexus Endpoint: "Append", "Read", "Close", "NotifierState" and "Notify", which callers
+// make as synchronous direct Nexus calls (StartNexusOperation), accepted only when CHASM and
+// frontend.enableDirectNexusCalls are enabled; and "Wait", an asynchronous operation that workflows
+// call as an ordinary Nexus operation. They operate on the stream owned by a workflow run
 // chain or a Standalone Activity execution. The server stores the stream embedded in its owner, so
 // the stream exists only while its owner does. A failed operation returns an operation failure whose
 // ApplicationFailureInfo type is the name of a StreamFailureType value; a malformed request fails
@@ -268,6 +270,13 @@ message ReadRequest {
     // If positive, reads the last N matching records instead, ignoring the cursor's position and
     // wait. The response cursor is then the stream's end.
     int32 last = 6;
+    // If set, reads no record after the one at this cursor, which must be of the same stream. A
+    // workflow's replay re-reads a recorded range with it.
+    bytes until = 7;
+    // If positive, the records' payloads total at most this many bytes: the read stops before the
+    // first record that would exceed it, and the response cursor resumes at that record. A record
+    // that alone exceeds it fails the read as TOO_LARGE.
+    int64 max_bytes = 8;
 }
 
 message ReadResponse {
@@ -278,6 +287,82 @@ message ReadResponse {
     // Set once the stream is closed and the reader has every record. A read of the last N records
     // sets it whenever the stream is closed.
     StreamClose close = 3;
+    // The stream's mode for the owner's current run.
+    StreamMode mode = 4;
+    // Set once the owner has closed. With retention, when the stream will be removed.
+    google.protobuf.Timestamp owner_close_time = 5;
+    // The namespace's retention, which applies from owner_close_time.
+    google.protobuf.Duration retention = 6;
+}
+
+
+// A workflow owner's declaration of its stream's mode, sent as the body of a protocol message in
+// the completion of each run's first workflow task. Only a workflow that declares commit mode sends
+// it; a run that does not send it has a sink-mode stream.
+message StreamModeDeclaration {
+    StreamMode mode = 1;
+}
+
+// Input of the asynchronous "Wait" operation, which a workflow calls, as an ordinary Nexus
+// operation, after a read returned nothing. It completes at once if what it waits for is already
+// there; otherwise it stores a subscription, which the stream completes once, and removes.
+//
+// For a native stream, set after and topics: the next matching append, or the close, completes it.
+// For a stream in an external store, set notifier: the next Notify of the owner completes it.
+//
+// It also completes when the owner continues as new or closes, when the owner does not exist, when
+// the stream's mode becomes known, and when the subscription expires. A stream holds at most 2,000
+// unfired subscriptions; beyond that Wait fails with ResourceExhausted.
+message WaitRequest {
+    StreamRef stream = 1;
+    // A native stream: wait for a matching record after this cursor.
+    // (-- api-linter: core::0140::prepositions=disabled
+    //     aip.dev/not-precedent: as ReadRequest.after. --)
+    bytes after = 2;
+    repeated string topics = 3;
+    // A stream in an external store: wait for a Notify after this position.
+    NotifierPosition notifier = 4;
+    // How long the subscription lives before it expires. Zero means 7 days, the most.
+    google.protobuf.Duration lifetime = 5;
+}
+
+// The state of an owner's notifier, for a stream in an external store: a counter that each Notify
+// increments, kept in memory on the owner's History host, and a generation that changes whenever
+// the counter is lost. Wait completes at once if either differs from the current one.
+message NotifierPosition {
+    int64 generation = 1;
+    int64 counter = 2;
+}
+
+message WaitResponse {
+    WakeReason reason = 1;
+    // Set when reason is OWNER_ENDED: the state the owner ended in.
+    CloseState owner_end = 2;
+    // The stream's mode, as in ReadResponse.
+    StreamMode mode = 3;
+}
+
+
+// Input of the "NotifierState" operation: reads the owner's notifier position, for a stream in an
+// external store.
+message NotifierStateRequest {
+    StreamRef stream = 1;
+}
+
+message NotifierStateResponse {
+    NotifierPosition position = 1;
+    // Set when the owner has ended: the state it ended in.
+    CloseState owner_end = 2;
+}
+
+// Input of the "Notify" operation: a producer to a stream in an external store calls it after
+// appending. It fires the owner's subscriptions, and writes nothing when there are none. A Notify to
+// an owner that does not exist succeeds and does nothing.
+message NotifyRequest {
+    StreamRef stream = 1;
+}
+
+message NotifyResponse {
 }
 
 // Input of the "Close" operation. Only the stream's owner may close the stream: for a
@@ -367,4 +452,35 @@ enum WorkflowAppendMode {
     // The records travel in the workflow task completion and are appended in its transaction, so
     // records from a task attempt that does not complete are never delivered. Native only.
     WORKFLOW_APPEND_MODE_COMMIT = 2;
+}
+
+// A stream's mode, which its owner declares, and which decides how workflows read it.
+enum StreamMode {
+    // Not yet known: the owner is a workflow whose first workflow task has not completed. A
+    // workflow does not read the stream until the mode is known; it waits.
+    STREAM_MODE_UNSPECIFIED = 0;
+    // The default, and always for a Standalone Activity owner. A workflow reads with a local
+    // activity, and records only the range and a digest.
+    STREAM_MODE_SINK = 1;
+    // Declared by a workflow owner. Its own records are appended at workflow task commit, and a
+    // workflow reads with synchronous Read operations, whose results, Records included, are in its
+    // History.
+    STREAM_MODE_COMMIT = 2;
+}
+
+// Why a Wait completed. Every wake may be spurious: the reader reads again.
+enum WakeReason {
+    WAKE_REASON_UNSPECIFIED = 0;
+    // A matching record was appended, or Notify was called.
+    WAKE_REASON_APPENDED = 1;
+    // The stream closed.
+    WAKE_REASON_CLOSED = 2;
+    // The owner ended without closing the stream (external stores), or continued as new.
+    WAKE_REASON_OWNER_ENDED = 3;
+    // The owner does not exist.
+    WAKE_REASON_OWNER_NOT_FOUND = 4;
+    // The stream's mode became known.
+    WAKE_REASON_MODE_KNOWN = 5;
+    // The subscription expired.
+    WAKE_REASON_EXPIRED = 6;
 }

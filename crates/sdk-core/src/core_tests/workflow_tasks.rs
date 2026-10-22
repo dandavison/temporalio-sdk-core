@@ -3451,3 +3451,103 @@ async fn lang_protocol_messages_are_sent_in_workflow_task_completion() {
     core.complete_workflow_activation(completion).await.unwrap();
     core.drain_pollers_and_shutdown().await;
 }
+
+#[tokio::test]
+async fn lang_can_end_workflow_task_while_local_activity_runs() {
+    let wfid = "fake_wf_id";
+    let mut t = TestHistoryBuilder::default();
+    t.add_by_type(EventType::WorkflowExecutionStarted);
+    t.add_workflow_task_scheduled_and_started();
+    let first_wft = hist_to_poll_resp(&t, wfid.to_string(), ResponseType::AllHistory).resp;
+    t.add_workflow_task_completed();
+    t.add_workflow_task_scheduled_and_started();
+    let second_wft = hist_to_poll_resp(&t, wfid.to_string(), ResponseType::AllHistory).resp;
+
+    let mut mock_cfg = MockPollCfg::from_resp_batches(
+        wfid,
+        t,
+        [ResponseType::Raw(first_wft), ResponseType::Raw(second_wft)],
+        mock_worker_client(),
+    );
+    mock_cfg.make_poll_stream_interminable = true;
+    let completions = Arc::new(std::sync::Mutex::new(vec![]));
+    let recorded = completions.clone();
+    mock_cfg.completion_mock_fn = Some(Box::new(move |c| {
+        recorded.lock().unwrap().push((
+            c.force_create_new_workflow_task,
+            c.commands
+                .iter()
+                .map(|c| c.command_type())
+                .collect::<Vec<_>>(),
+        ));
+        Ok(Default::default())
+    }));
+    let mut mock = build_mock_pollers(mock_cfg);
+    mock.worker_cfg(|wc| wc.max_cached_workflows = 1);
+    let core = Arc::new(mock_worker(mock));
+
+    let activation = core.poll_workflow_activation().await.unwrap();
+    let mut completion = WorkflowActivationCompletion::from_cmd(
+        activation.run_id,
+        schedule_local_activity_cmd(
+            1,
+            "1",
+            ActivityCancellationType::TryCancel,
+            Duration::from_secs(60),
+        ),
+    );
+    if let Some(workflow_activation_completion::Status::Successful(success)) =
+        completion.status.as_mut()
+    {
+        success.force_new_workflow_task = true;
+    }
+    let complete_core = core.clone();
+    let completed =
+        tokio::spawn(async move { complete_core.complete_workflow_activation(completion).await });
+    let act_task = core.poll_activity_task().await.unwrap();
+    time::timeout(Duration::from_secs(5), completed)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    // The task completed while the local activity runs.
+    time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(*completions.lock().unwrap(), vec![(true, vec![])]);
+
+    core.complete_activity_task(ActivityTaskCompletion {
+        task_token: act_task.task_token,
+        result: Some(ActivityExecutionResult::ok(Payload::default())),
+    })
+    .await
+    .unwrap();
+    let activation = time::timeout(Duration::from_secs(5), core.poll_workflow_activation())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_matches!(
+        activation.jobs.as_slice(),
+        [WorkflowActivationJob {
+            variant: Some(workflow_activation_job::Variant::ResolveActivity(_)),
+        }]
+    );
+    core.complete_workflow_activation(WorkflowActivationCompletion::from_cmd(
+        activation.run_id,
+        CompleteWorkflowExecution { result: None }.into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        *completions.lock().unwrap(),
+        vec![
+            (true, vec![]),
+            (
+                false,
+                vec![
+                    CommandType::RecordMarker,
+                    CommandType::CompleteWorkflowExecution
+                ]
+            ),
+        ]
+    );
+    core.shutdown().await;
+}

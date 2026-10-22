@@ -294,12 +294,14 @@ impl WFStream {
                     commands,
                     used_flags,
                     protocol_messages,
+                    force_new_workflow_task,
                     versioning_behavior,
                     ..
                 } => match rh.successful_completion(
                     commands,
                     used_flags,
                     protocol_messages,
+                    force_new_workflow_task,
                     versioning_behavior,
                     complete.response_tx,
                     false,

@@ -1380,6 +1380,7 @@ fn validate_completion(
                 commands,
                 used_flags: success.used_internal_flags,
                 protocol_messages: success.protocol_messages,
+                force_new_workflow_task: success.force_new_workflow_task,
                 versioning_behavior: success.versioning_behavior.try_into().unwrap_or_default(),
             })
         }
@@ -1405,6 +1406,7 @@ enum ValidatedCompletion {
         commands: Vec<WFCommand>,
         used_flags: Vec<u32>,
         protocol_messages: Vec<ProtocolMessage>,
+        force_new_workflow_task: bool,
         versioning_behavior: VersioningBehavior,
     },
     Fail {

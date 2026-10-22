@@ -416,11 +416,13 @@ impl ManagedRun {
     ///
     /// Can return an error in the event that another page of history needs to be fetched before
     /// the completion can proceed.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn successful_completion(
         &mut self,
         mut commands: Vec<WFCommand>,
         used_flags: Vec<u32>,
         protocol_messages: Vec<ProtocolMessage>,
+        force_new_workflow_task: bool,
         versioning_behavior: VersioningBehavior,
         resp_chan: Option<oneshot::Sender<ActivationCompleteResult>>,
         is_forced_failure: bool,
@@ -498,6 +500,7 @@ impl ManagedRun {
                 query_responses,
                 used_flags,
                 protocol_messages,
+                force_new_workflow_task,
                 resp_chan,
                 is_forced_failure,
                 versioning_behavior,
@@ -673,6 +676,7 @@ impl ManagedRun {
                         // Lang's protocol messages from earlier activations of this task are still
                         // queued, and are sent with this completion.
                         vec![],
+                        false,
                         VersioningBehavior::Unspecified, // Doesn't matter since we're failing wf
                         resp_chan,
                         true,
@@ -755,7 +759,8 @@ impl ManagedRun {
             || self
                 .waiting_on_la
                 .as_ref()
-                .is_some_and(|waiting| waiting.heartbeat_timeout_pending);
+                .is_some_and(|waiting| waiting.heartbeat_timeout_pending)
+            || (completion.force_new_workflow_task && !self.wfm.machines.replaying);
         let data = CompletionDataForWFT {
             task_token: completion.task_token,
             query_responses: completion.query_responses,
@@ -1604,6 +1609,8 @@ struct RunActivationCompletion {
     used_flags: Vec<u32>,
     /// Sent as they are in the workflow task completion.
     protocol_messages: Vec<ProtocolMessage>,
+    /// Lang asks to complete the workflow task now, as a local activity heartbeat does.
+    force_new_workflow_task: bool,
     is_forced_failure: bool,
     /// Used to notify the worker when the completion is done processing and the completion can
     /// unblock. Must always be `Some` when initialized.
